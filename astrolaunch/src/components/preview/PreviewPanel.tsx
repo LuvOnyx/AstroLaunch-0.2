@@ -1,122 +1,124 @@
 "use client"
 /**
- * PreviewPanel v2 — same WebContainer dev server, but exposes the live URL on
- * window.alPreviewUrl (for plugins) and routes output to the bottom Output
- * panel via the alWebContainer.onOutput bus.
+ * PreviewPanel v3 — auto-watches WebContainer server-ready.
+ * No "Run" button needed: user starts their dev server from the integrated terminal.
  */
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { AppIcon } from "@/lib/iconify"
-import { bootWebContainer, mountFiles } from "@/lib/webcontainer/boot"
-import { db } from "@/lib/storage/db"
+import { bootWebContainer } from "@/lib/webcontainer/boot"
 import { motion } from "framer-motion"
-import { useWorkspace } from "@/store/workspace"
 
-interface Props { running: boolean }
-
-export function PreviewPanel({ running }: Props) {
+export function PreviewPanel() {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [url, setUrl] = useState<string | null>(null)
-  const [status, setStatus] = useState<string>("Idle")
-  const [logs, setLogs] = useState<string[]>([])
-  const { setBottomTab, setShowBottomPanel } = useWorkspace()
-
-  const append = (s: string) => setLogs((l) => [...l.slice(-200), s])
+  const [status, setStatus] = useState<"idle" | "booting" | "live" | "error">("idle")
+  const [statusText, setStatusText] = useState("Starting WebContainer…")
 
   useEffect(() => {
-    if (!running) return
+    // Check if a dev server is already running (e.g. page reload after starting)
+    const existing = (window as unknown as { alPreviewUrl?: string }).alPreviewUrl
+    if (existing) {
+      setUrl(existing)
+      setStatus("live")
+      setStatusText("Live")
+      return
+    }
+
     let cancelled = false
+    setStatus("booting")
+    setStatusText("Starting WebContainer…")
+
     ;(async () => {
       try {
-        setStatus("Booting WebContainer…")
         const wc = await bootWebContainer()
         if (cancelled) return
-        setStatus("Mounting files…")
-        const files = await db.files.where("type").equals("file").toArray()
-        const tree: Record<string, string> = {}
-        for (const f of files) tree[f.path.replace(/^\//, "")] = f.content ?? ""
-        if (!tree["package.json"]) {
-          tree["package.json"] = JSON.stringify({
-            name: "astro-preview", private: true, type: "module",
-            scripts: { dev: "vite --host 0.0.0.0 --port 3001" },
-            dependencies: { react: "^19.0.0", "react-dom": "^19.0.0" },
-            devDependencies: { vite: "^5.4.0", "@vitejs/plugin-react": "^4.3.0" },
-          }, null, 2)
-          tree["vite.config.js"] = `import react from "@vitejs/plugin-react"\nexport default { plugins: [react()] }`
-          tree["index.html"] = `<!doctype html><html><head><meta charset="utf-8"><title>AstroLaunch Preview</title></head><body><div id="root"></div><script type="module" src="/main.jsx"></script></body></html>`
-          tree["main.jsx"] = `import { createRoot } from "react-dom/client"\nimport App from "./src/App"\ncreateRoot(document.getElementById("root")).render(<App />)`
-        }
-        await mountFiles(wc, tree)
-        if (cancelled) return
-        setStatus("Installing deps…")
-        const install = await wc.spawn("npm", ["install"])
-        install.output.pipeTo(new WritableStream({ write(c) { append(c) } }))
-        const code = await install.exit
-        if (code !== 0) { setStatus("Install failed"); return }
-        if (cancelled) return
-        setStatus("Starting dev server…")
-        const dev = await wc.spawn("npm", ["run", "dev"])
-        dev.output.pipeTo(new WritableStream({ write(c) { append(c) } }))
+        setStatusText("Run `npm run dev` in the terminal →")
+        setStatus("idle")
+
         wc.on("server-ready", (_port, ready) => {
           if (cancelled) return
           setUrl(ready)
-          setStatus("Live")
+          setStatus("live")
+          setStatusText("Live")
           ;(window as unknown as { alPreviewUrl?: string }).alPreviewUrl = ready
         })
       } catch (e) {
-        setStatus(`Error: ${String(e)}`)
+        if (cancelled) return
+        setStatus("error")
+        setStatusText(`Error: ${String(e)}`)
       }
     })()
-    return () => { cancelled = true }
-  }, [running])
 
-  const showFullLog = () => { setBottomTab("output"); setShowBottomPanel(true) }
+    return () => { cancelled = true }
+  }, [])
+
+  const reload = () => iframeRef.current?.contentWindow?.location.reload()
+  const openExternal = () => url && window.open(url, "_blank")
 
   return (
     <div className="h-full flex flex-col bg-al-canvas">
-      <div className="h-9 flex items-center gap-2 px-3 border-b border-border bg-al-panel">
-        <span className={`w-2 h-2 rounded-full ${status === "Live" ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground"}`} />
-        <span className="text-xs">{status}</span>
-        {url && <span className="ml-2 text-xs text-muted-foreground truncate max-w-[60%]">{url}</span>}
+      {/* Status bar */}
+      <div className="h-9 flex items-center gap-2 px-3 border-b border-border bg-al-panel flex-shrink-0">
+        <span className={[
+          "w-2 h-2 rounded-full transition-colors",
+          status === "live" ? "bg-emerald-500 animate-pulse" :
+          status === "booting" ? "bg-amber-400 animate-pulse" :
+          status === "error" ? "bg-red-500" :
+          "bg-muted-foreground/30",
+        ].join(" ")} />
+        <span className="text-xs text-muted-foreground">{statusText}</span>
+        {url && (
+          <span className="text-xs text-muted-foreground/60 truncate max-w-[50%] font-mono">{url}</span>
+        )}
         <div className="ml-auto flex gap-1">
-          <Button size="icon-sm" variant="ghost" onClick={showFullLog} title="Full output log">
-            <AppIcon name="terminal" width={14} />
-          </Button>
-          <Button size="icon-sm" variant="ghost" onClick={() => iframeRef.current?.contentWindow?.location.reload()} title="Reload">
-            <AppIcon name="refresh" width={14} />
-          </Button>
           {url && (
-            <Button size="icon-sm" variant="ghost" onClick={() => window.open(url, "_blank")} title="Open in new tab">
-              <AppIcon name="preview" width={14} />
-            </Button>
+            <>
+              <Button size="icon-sm" variant="ghost" onClick={reload} title="Reload preview">
+                <AppIcon name="refresh" width={14} />
+              </Button>
+              <Button size="icon-sm" variant="ghost" onClick={openExternal} title="Open in new tab">
+                <AppIcon name="preview" width={14} />
+              </Button>
+            </>
           )}
         </div>
       </div>
-      <div className="flex-1 relative bg-white">
+
+      {/* Preview iframe or waiting state */}
+      <div className="flex-1 relative bg-white overflow-hidden">
         {url ? (
           <motion.iframe
             ref={iframeRef}
+            key={url}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ duration: 0.3 }}
+            transition={{ duration: 0.35 }}
             src={url}
             className="w-full h-full border-0"
             sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"
           />
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-            <div className="text-center space-y-2">
-              <AppIcon name="preview" width={48} className="mx-auto opacity-30" />
-              <div>{running ? status : "Press Run to start the live preview."}</div>
+          <div className="absolute inset-0 flex items-center justify-center bg-al-canvas">
+            <div className="text-center space-y-4 px-6">
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-al-panel border border-border flex items-center justify-center">
+                <AppIcon name="preview" width={32} className="opacity-30" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">No dev server running</p>
+                <p className="text-xs text-muted-foreground">Open the terminal and run:</p>
+              </div>
+              <div className="bg-background/60 border border-border rounded-lg px-4 py-2.5 font-mono text-xs text-foreground text-left space-y-0.5">
+                <div><span className="text-muted-foreground">$</span> npm install</div>
+                <div><span className="text-muted-foreground">$</span> npm run dev</div>
+              </div>
+              <p className="text-[11px] text-muted-foreground/60">
+                The preview will appear automatically when the server is ready
+              </p>
             </div>
           </div>
         )}
       </div>
-      {logs.length > 0 && (
-        <div className="h-24 border-t border-border bg-al-panel/60 overflow-auto p-2 text-[10px] font-mono text-muted-foreground whitespace-pre-wrap">
-          {logs.slice(-12).join("")}
-        </div>
-      )}
     </div>
   )
 }

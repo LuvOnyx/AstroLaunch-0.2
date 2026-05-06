@@ -62,3 +62,22 @@ export const DEFAULT_PERSONAS: AgentPersona[] = [
       "You are the Refactorer. Improve code clarity, modularity, and types without changing public behavior. Run tests and the typecheck after every change.",
   },
 ]
+
+/**
+ * Auto-select the most appropriate persona based on the user's prompt.
+ * Astronaughts use this so users never have to pick a persona manually.
+ */
+export function selectPersonaForPrompt(prompt: string): string {
+  const lower = prompt.toLowerCase().trim()
+  if (lower.startsWith("/build")) return "builder"
+  if (/\b(design|ui|ux|visual|style|color|colour|layout|figma|penpot|css|animation|theme|component)\b/.test(lower)) return "designer"
+  if (/\b(bug|error|fix|debug|crash|trace|exception|fail|broken|issue|problem|not working)\b/.test(lower)) return "debugger"
+  if (/\b(refactor|clean\s*up|improve|restructure|rename|reorganize|simplify|rewrite|optimize)\b/.test(lower)) return "refactorer"
+  if (/\b(review|audit|check|verify|test|lint|quality|correctness)\b/.test(lower)) return "reviewer"
+  if (/\b(plan|architect|structure|break\s*down|decompose|blueprint|strategy)\b/.test(lower)) return "architect"
+  return "builder"
+}
+
+export function getPersonaById(id: string): AgentPersona | undefined {
+  return DEFAULT_PERSONAS.find((p) => p.id === id)
+}

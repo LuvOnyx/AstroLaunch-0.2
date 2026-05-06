@@ -200,3 +200,15 @@ export interface UsageRow {
   costUsd: number
   ts: number
 }
+
+export interface Astronaught {
+  id: string
+  name: string
+  emoji: string
+  description?: string
+  createdAt: number
+  updatedAt: number
+  activeChatId?: string | null
+  totalCostUsd?: number
+  totalTokens?: number
+}

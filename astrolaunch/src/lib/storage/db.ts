@@ -2,7 +2,7 @@
 import Dexie, { Table } from "dexie"
 import type {
   FileNode, AgentChat, AgentMessage, AgentTask, ProjectMeta, AgentPersona,
-  PluginRecord, TerminalSession, UsageRow,
+  PluginRecord, TerminalSession, UsageRow, Astronaught,
 } from "@/types"
 
 class AstroDB extends Dexie {
@@ -15,10 +15,10 @@ class AstroDB extends Dexie {
   plugins!: Table<PluginRecord, string>
   terminals!: Table<TerminalSession, string>
   usage!: Table<UsageRow, string>
+  astronaughts!: Table<Astronaught, string>
 
   constructor() {
     super("astrolaunch-db")
-    // v1 schema (kept for migration)
     this.version(1).stores({
       files: "id, parentId, path, type",
       chats: "id, agentId, updatedAt, archived",
@@ -27,7 +27,6 @@ class AstroDB extends Dexie {
       projects: "id, name, createdAt",
       personas: "id, name",
     })
-    // v2 schema — add plugins, terminals, usage
     this.version(2).stores({
       files: "id, parentId, path, type, agentTouched",
       chats: "id, agentId, updatedAt, archived",
@@ -38,9 +37,19 @@ class AstroDB extends Dexie {
       plugins: "id, name, enabled, installedAt",
       terminals: "id, createdAt",
       usage: "id, chatId, taskId, model, ts",
-    }).upgrade(async () => {
-      // No-op data migration — new tables start empty.
-    })
+    }).upgrade(async () => {})
+    this.version(3).stores({
+      files: "id, parentId, path, type, agentTouched",
+      chats: "id, agentId, astronaughtId, updatedAt, archived",
+      messages: "id, chatId, createdAt, taskId, personaId",
+      tasks: "id, chatId, parentTaskId, status, is_done, updatedAt",
+      projects: "id, name, createdAt",
+      personas: "id, name",
+      plugins: "id, name, enabled, installedAt",
+      terminals: "id, createdAt",
+      usage: "id, chatId, taskId, model, ts",
+      astronaughts: "id, name, createdAt",
+    }).upgrade(async () => {})
   }
 }
 

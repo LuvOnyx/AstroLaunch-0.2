@@ -13,20 +13,16 @@ interface WorkspaceState {
   centerMode: CenterMode
   showLeftSidebar: boolean
   showRightChat: boolean
-  showBottomPanel: boolean
-  bottomTab: BottomPanelTab
-  bottomHeight: number
   agentChatPosition: { x: number; y: number }
   agentChatSize: { w: number; h: number }
   agentChatMinimized: boolean
   activeChatId: string | null
+  activeAstronautId: string | null
   draggedFileId: string | null
   dropTargetId: string | null
   dropPosition: "before" | "inside" | "after" | null
-  // Diff viewer
   diffViewerOpen: boolean
   diffViewerPath: string | null
-  // Plugin runtime
   activePluginId: string | null
 
   setActiveFile: (id: string | null) => void
@@ -36,13 +32,11 @@ interface WorkspaceState {
   setCenterMode: (m: CenterMode) => void
   setShowLeftSidebar: (b: boolean) => void
   setShowRightChat: (b: boolean) => void
-  setShowBottomPanel: (b: boolean) => void
-  setBottomTab: (t: BottomPanelTab) => void
-  setBottomHeight: (h: number) => void
   setAgentChatPosition: (p: { x: number; y: number }) => void
   setAgentChatSize: (s: { w: number; h: number }) => void
   setAgentChatMinimized: (b: boolean) => void
   setActiveChatId: (id: string | null) => void
+  setActiveAstronautId: (id: string | null) => void
   setDragged: (id: string | null) => void
   setDropTarget: (id: string | null, position?: "before" | "inside" | "after" | null) => void
   setDiffViewer: (open: boolean, path?: string | null) => void
@@ -58,13 +52,11 @@ export const useWorkspace = create<WorkspaceState>()(
       centerMode: "preview",
       showLeftSidebar: true,
       showRightChat: true,
-      showBottomPanel: false,
-      bottomTab: "terminal",
-      bottomHeight: 240,
       agentChatPosition: { x: 24, y: 80 },
-      agentChatSize: { w: 420, h: 600 },
+      agentChatSize: { w: 560, h: 640 },
       agentChatMinimized: false,
       activeChatId: null,
+      activeAstronautId: null,
       draggedFileId: null,
       dropTargetId: null,
       dropPosition: null,
@@ -88,31 +80,27 @@ export const useWorkspace = create<WorkspaceState>()(
       setCenterMode: (centerMode) => set({ centerMode }),
       setShowLeftSidebar: (showLeftSidebar) => set({ showLeftSidebar }),
       setShowRightChat: (showRightChat) => set({ showRightChat }),
-      setShowBottomPanel: (showBottomPanel) => set({ showBottomPanel }),
-      setBottomTab: (bottomTab) => set({ bottomTab, showBottomPanel: true }),
-      setBottomHeight: (bottomHeight) => set({ bottomHeight }),
       setAgentChatPosition: (agentChatPosition) => set({ agentChatPosition }),
       setAgentChatSize: (agentChatSize) => set({ agentChatSize }),
       setAgentChatMinimized: (agentChatMinimized) => set({ agentChatMinimized }),
       setActiveChatId: (activeChatId) => set({ activeChatId }),
+      setActiveAstronautId: (activeAstronautId) => set({ activeAstronautId }),
       setDragged: (draggedFileId) => set({ draggedFileId }),
       setDropTarget: (dropTargetId, dropPosition = null) => set({ dropTargetId, dropPosition }),
       setDiffViewer: (diffViewerOpen, diffViewerPath = null) => set({ diffViewerOpen, diffViewerPath }),
       setActivePluginId: (activePluginId) => set({ activePluginId }),
     }),
     {
-      name: "astrolaunch.workspace.v2",
+      name: "astrolaunch.workspace.v3",
       partialize: (s) => ({
         leftTab: s.leftTab,
         centerMode: s.centerMode,
         showLeftSidebar: s.showLeftSidebar,
         showRightChat: s.showRightChat,
-        showBottomPanel: s.showBottomPanel,
-        bottomTab: s.bottomTab,
-        bottomHeight: s.bottomHeight,
         agentChatPosition: s.agentChatPosition,
         agentChatSize: s.agentChatSize,
         agentChatMinimized: s.agentChatMinimized,
+        activeAstronautId: s.activeAstronautId,
       }),
     }
   )
