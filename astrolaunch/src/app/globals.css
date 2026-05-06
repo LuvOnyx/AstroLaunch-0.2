@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 4%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 4%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 4%;
+    --primary: 263 70% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 6% 10%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 6% 10%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 263 70% 60%;
+    --radius: 0.6rem;
+    --font-sans: "Inter";
+    --font-mono: "JetBrains Mono";
+    --al-density: 1;
+    --al-topbar: 240 6% 10%;
+    --al-sidebar: 240 6% 8%;
+    --al-panel: 240 6% 12%;
+    --al-canvas: 240 5% 15%;
+    --al-chat: 240 7% 11%;
+    --al-accent: 263 70% 60%;
+  }
+  .dark {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 6%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 6%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 263 70% 65%;
+    --primary-foreground: 240 6% 10%;
+    --secondary: 240 4% 16%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 240 4% 16%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 63% 31%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
+    --ring: 263 70% 65%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html, body, #__next { height: 100%; }
+  body { @apply bg-background text-foreground antialiased; font-feature-settings: "rlig" 1, "calt" 1; }
+}
+
+.al-drag-ghost {
+  position: fixed; pointer-events: none; z-index: 9999;
+  opacity: 0.85; transform: rotate(-2deg) scale(1.02);
+  background: hsl(var(--al-panel) / 0.95);
+  border: 1px solid hsl(var(--al-accent) / 0.6);
+  box-shadow: 0 20px 50px -10px hsl(var(--al-accent) / 0.4), 0 0 0 1px hsl(var(--al-accent) / 0.2);
+  border-radius: 8px; padding: 6px 12px; font-size: 13px; backdrop-filter: blur(8px);
+}
+.al-drop-target { background: hsl(var(--al-accent) / 0.15); outline: 1px dashed hsl(var(--al-accent) / 0.6); }
+.al-drop-line { height: 2px; background: hsl(var(--al-accent)); border-radius: 2px; box-shadow: 0 0 8px hsl(var(--al-accent)); margin: 0 8px; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); border: 2px solid transparent; background-clip: content-box; }
+
+.rainbow-1 { color: #ffd700; }
+.rainbow-2 { color: #da70d6; }
+.rainbow-3 { color: #87ceeb; }
+.rainbow-4 { color: #ff7f50; }
+.rainbow-5 { color: #98fb98; }
+
+/* xterm baseline */
+.xterm { cursor: text; position: relative; user-select: none; }
+.xterm.focus, .xterm:focus { outline: none; }
+.xterm .xterm-helpers { position: absolute; top: 0; z-index: 5; }
+.xterm .xterm-helper-textarea {
+  position: absolute; opacity: 0; left: -9999em; top: 0; width: 0; height: 0; z-index: -5;
+  white-space: nowrap; overflow: hidden; resize: none;
+}
+.xterm .xterm-viewport { overflow-y: scroll; cursor: default; position: absolute; right: 0; left: 0; top: 0; bottom: 0; }
+.xterm .xterm-screen { position: relative; }
+.xterm .xterm-screen canvas { position: absolute; left: 0; top: 0; }
+.xterm .xterm-scroll-area { visibility: hidden; }
+.xterm-char-measure-element { display: inline-block; visibility: hidden; position: absolute; top: 0; left: -9999em; line-height: normal; }
+.xterm.enable-mouse-events { cursor: default; }
+.xterm.xterm-cursor-pointer, .xterm .xterm-cursor-pointer { cursor: pointer; }
+.xterm .xterm-accessibility, .xterm .xterm-message {
+  position: absolute; left: 0; top: 0; bottom: 0; right: 0; z-index: 10;
+  color: transparent; pointer-events: none;
+}
+.xterm-dim { opacity: 0.5; }
+.xterm-underline-1 { text-decoration: underline; }
+.xterm-strikethrough { text-decoration: line-through; }
+.xterm-decoration-overview-ruler { z-index: 7; position: absolute; top: 0; right: 0; pointer-events: none; }
+
+@keyframes al-agent-stripe {
+  0% { background-position: 0 0; }
+  100% { background-position: 32px 0; }
+}
+.al-agent-running {
+  background-image: repeating-linear-gradient(-45deg, hsl(var(--al-accent) / 0.15) 0 8px, transparent 8px 16px);
+  animation: al-agent-stripe 1.6s linear infinite;
+}
