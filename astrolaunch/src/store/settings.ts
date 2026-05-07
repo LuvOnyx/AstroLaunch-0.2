@@ -64,10 +64,15 @@ export interface SettingsState {
   tabSize: number
   aiInlineEdit: boolean
   pluginsEnabled: boolean
+  /** Show welcome modal on startup */
+  showWelcome: boolean
+  /** Recently opened project folder names */
+  recentProjects: string[]
   set: <K extends keyof SettingsState>(k: K, v: SettingsState[K]) => void
   setColor: (k: keyof ThemeColors, v: string) => void
   setApiKey: (provider: AgentProvider, key: string) => void
   setRetry: (patch: Partial<RetryPolicy>) => void
+  addRecentProject: (name: string) => void
   reset: () => void
 }
 
@@ -112,6 +117,8 @@ const DEFAULTS = {
   tabSize: 2,
   aiInlineEdit: true,
   pluginsEnabled: true,
+  showWelcome: true,
+  recentProjects: [] as string[],
 }
 
 export const useSettings = create<SettingsState>()(
@@ -122,6 +129,9 @@ export const useSettings = create<SettingsState>()(
       setColor: (k, v) => set((s) => ({ colors: { ...s.colors, [k]: v } })),
       setApiKey: (provider, key) => set((s) => ({ apiKeys: { ...s.apiKeys, [provider]: key } })),
       setRetry: (patch) => set((s) => ({ retry: { ...s.retry, ...patch } })),
+      addRecentProject: (name) => set((s) => ({
+        recentProjects: [name, ...s.recentProjects.filter((p) => p !== name)].slice(0, 10),
+      })),
       reset: () => set(DEFAULTS),
     }),
     { name: "astrolaunch.settings.v3" }

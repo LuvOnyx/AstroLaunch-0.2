@@ -81,25 +81,22 @@ async function* streamGemini(opts: RouterOptions): AsyncGenerator<RouterChunk> {
   let thinkingText = ""
 
   for await (const chunk of stream.stream) {
-    // Check for thinking parts
     const raw = chunk as unknown as { candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }> }
     const parts = raw.candidates?.[0]?.content?.parts ?? []
-    for (const part of parts) {
-      if (part.thought && part.text) {
-        thinkingText += part.text
-        yield { thinking: part.text }
-      } else {
-        const t = chunk.text()
-        if (t) {
-          outputText += t
-          yield { delta: t }
+    if (parts.length === 0) {
+      // Fallback: use the SDK helper
+      try { const t = chunk.text(); if (t) { outputText += t; yield { delta: t } } } catch {}
+    } else {
+      let chunkText = ""
+      for (const part of parts) {
+        if (part.thought && part.text) {
+          thinkingText += part.text
+          yield { thinking: part.text }
+        } else if (part.text) {
+          chunkText += part.text
         }
       }
-    }
-    // If no parts detected, fall back
-    if (parts.length === 0) {
-      const t = chunk.text()
-      if (t) { outputText += t; yield { delta: t } }
+      if (chunkText) { outputText += chunkText; yield { delta: chunkText } }
     }
   }
 

@@ -2,7 +2,7 @@
 import { create } from "zustand"
 import { persist } from "zustand/middleware"
 
-export type LeftPanelTab = "files" | "git" | "search" | "agents" | "plugins"
+export type LeftPanelTab = "files" | "git" | "search" | "plugins"
 export type CenterMode = "preview" | "canvas" | "split"
 export type BottomPanelTab = "terminal" | "problems" | "output" | "agent-log"
 
@@ -13,6 +13,9 @@ interface WorkspaceState {
   centerMode: CenterMode
   showLeftSidebar: boolean
   showRightChat: boolean
+  showBottomPanel: boolean
+  bottomTab: BottomPanelTab
+  bottomHeight: number
   agentChatPosition: { x: number; y: number }
   agentChatSize: { w: number; h: number }
   agentChatMinimized: boolean
@@ -32,6 +35,9 @@ interface WorkspaceState {
   setCenterMode: (m: CenterMode) => void
   setShowLeftSidebar: (b: boolean) => void
   setShowRightChat: (b: boolean) => void
+  setShowBottomPanel: (b: boolean) => void
+  setBottomTab: (t: BottomPanelTab) => void
+  setBottomHeight: (h: number) => void
   setAgentChatPosition: (p: { x: number; y: number }) => void
   setAgentChatSize: (s: { w: number; h: number }) => void
   setAgentChatMinimized: (b: boolean) => void
@@ -52,6 +58,9 @@ export const useWorkspace = create<WorkspaceState>()(
       centerMode: "preview",
       showLeftSidebar: true,
       showRightChat: true,
+      showBottomPanel: true,
+      bottomTab: "terminal",
+      bottomHeight: 220,
       agentChatPosition: { x: 24, y: 80 },
       agentChatSize: { w: 560, h: 640 },
       agentChatMinimized: false,
@@ -80,6 +89,9 @@ export const useWorkspace = create<WorkspaceState>()(
       setCenterMode: (centerMode) => set({ centerMode }),
       setShowLeftSidebar: (showLeftSidebar) => set({ showLeftSidebar }),
       setShowRightChat: (showRightChat) => set({ showRightChat }),
+      setShowBottomPanel: (showBottomPanel) => set({ showBottomPanel }),
+      setBottomTab: (bottomTab) => set({ bottomTab }),
+      setBottomHeight: (bottomHeight) => set({ bottomHeight }),
       setAgentChatPosition: (agentChatPosition) => set({ agentChatPosition }),
       setAgentChatSize: (agentChatSize) => set({ agentChatSize }),
       setAgentChatMinimized: (agentChatMinimized) => set({ agentChatMinimized }),
@@ -97,6 +109,8 @@ export const useWorkspace = create<WorkspaceState>()(
         centerMode: s.centerMode,
         showLeftSidebar: s.showLeftSidebar,
         showRightChat: s.showRightChat,
+        showBottomPanel: s.showBottomPanel,
+        bottomTab: s.bottomTab,
         agentChatPosition: s.agentChatPosition,
         agentChatSize: s.agentChatSize,
         agentChatMinimized: s.agentChatMinimized,

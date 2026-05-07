@@ -5,7 +5,6 @@ import { motion, AnimatePresence } from "framer-motion"
 import { cn } from "@/lib/utils"
 import { FileTree } from "@/components/file-tree/FileTree"
 import { GitPanel } from "@/components/git-panel/GitPanel"
-import { AgentChatList } from "@/components/agent-chat/AgentChatList"
 import { SearchPanel } from "@/components/layout/SearchPanel"
 import { PluginPanel } from "@/components/plugins/PluginPanel"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -14,7 +13,6 @@ const TABS: { id: LeftPanelTab; icon: string; label: string; combo: string }[] =
   { id: "files",   icon: "folder", label: "Explorer",       combo: "⌘⇧E" },
   { id: "search",  icon: "search", label: "Search",         combo: "⌘⇧F" },
   { id: "git",     icon: "git",    label: "Source Control", combo: "⌘⇧G" },
-  { id: "agents",  icon: "agent",  label: "Agents",         combo: "⌘⇧A" },
   { id: "plugins", icon: "puzzle", label: "Plugins",        combo: "⌘⇧X" },
 ]
 
@@ -68,7 +66,6 @@ export function LeftSidebar() {
                 {leftTab === "files" && <FileTree />}
                 {leftTab === "git" && <GitPanel />}
                 {leftTab === "search" && <SearchPanel />}
-                {leftTab === "agents" && <AgentChatList />}
                 {leftTab === "plugins" && <PluginPanel />}
               </motion.div>
             </AnimatePresence>

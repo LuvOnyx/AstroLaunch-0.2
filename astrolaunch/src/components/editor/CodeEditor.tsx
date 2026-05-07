@@ -54,7 +54,7 @@ export function CodeEditor() {
   const syncTabs = useCallback(async () => {
     const files = await db.files.bulkGet(openFileIds)
     setTabs(files.filter(Boolean).map((f) => ({
-      id: f!.id, name: f!.name, dirty: false, touched: f!.agentTouched, path: f!.path,
+      id: f!.id, name: f!.name, dirty: false, touched: !!f!.agentTouched, path: f!.path,
     })))
   }, [openFileIds])
   useEffect(() => { syncTabs() }, [syncTabs, activeFileId])

@@ -323,11 +323,11 @@ export function FloatingAgentChat() {
           if (!match) continue
           try {
             const obj = JSON.parse(match[1])
-            if (obj.delta) {
+            if (typeof obj.delta === "string") {
               acc += obj.delta
               setMessages((prev) => prev.map((mm) => mm.id === assistantId ? { ...mm, content: acc } : mm))
             }
-            if (obj.thinking) {
+            if (typeof obj.thinking === "string") {
               thinkingAcc += obj.thinking
               setLiveThinking(thinkingAcc)
               setMessages((prev) => prev.map((mm) => mm.id === assistantId ? { ...mm, thinking: thinkingAcc } : mm))

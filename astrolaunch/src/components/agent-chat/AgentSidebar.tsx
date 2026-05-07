@@ -1,13 +1,9 @@
 "use client"
 /**
  * AgentSidebar — collapsible left panel inside FloatingAgentChat.
- *
- * Inspired by 1code's agents-sidebar.tsx design:
- *   - Chat history list with search
- *   - Quick-create new chat (auto-persona, no manual picker)
- *   - Archive / rename inline
- *   - Pin indicator for cost-heavy chats
- *   - Smooth framer-motion animations
+ * - Persona spawn grid (quick chat creation with a specific persona)
+ * - Chat history list with search, rename, archive
+ * - Smooth framer-motion animations
  */
 import { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
@@ -33,8 +29,7 @@ function formatTimeAgo(ts: number): string {
   if (m < 60) return `${m}m ago`
   const h = Math.floor(m / 60)
   if (h < 24) return `${h}h ago`
-  const d = Math.floor(h / 24)
-  return `${d}d ago`
+  return `${Math.floor(h / 24)}d ago`
 }
 
 export function AgentSidebar({ streaming, building }: AgentSidebarProps) {
@@ -43,6 +38,7 @@ export function AgentSidebar({ streaming, building }: AgentSidebarProps) {
   const [query, setQuery] = useState("")
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
+  const [spawnOpen, setSpawnOpen] = useState(false)
   const renameRef = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(async () => {
@@ -61,12 +57,13 @@ export function AgentSidebar({ streaming, building }: AgentSidebarProps) {
     if (renamingId) renameRef.current?.focus()
   }, [renamingId])
 
-  const createChat = async () => {
+  const createChat = async (agentId = "builder") => {
     const id = nanoid()
+    const persona = DEFAULT_PERSONAS.find((p) => p.id === agentId)
     await db.chats.add({
       id,
-      name: "New Chat",
-      agentId: "builder",
+      name: persona ? `${persona.name} Chat` : "New Chat",
+      agentId,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     })
@@ -113,20 +110,67 @@ export function AgentSidebar({ streaming, building }: AgentSidebarProps) {
           <AppIcon name="chat" width={12} />
           Chats
         </div>
-        <button
-          onClick={createChat}
-          className="flex items-center gap-0.5 text-[10px] text-al-accent hover:text-foreground transition rounded px-1 py-0.5 hover:bg-al-accent/10"
-          title="New chat"
-        >
-          <AppIcon name="plus" width={12} />
-          New
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setSpawnOpen((o) => !o)}
+            title="Spawn agent persona"
+            className={cn(
+              "p-1 rounded hover:bg-foreground/10 transition",
+              spawnOpen && "text-al-accent bg-al-accent/10"
+            )}
+          >
+            <AppIcon name="agent" width={12} />
+          </button>
+          <button
+            onClick={() => createChat("builder")}
+            className="flex items-center gap-0.5 text-[10px] text-al-accent hover:text-foreground transition rounded px-1 py-0.5 hover:bg-al-accent/10"
+            title="New chat"
+          >
+            <AppIcon name="plus" width={12} />
+            New
+          </button>
+        </div>
       </div>
+
+      {/* Persona spawn grid */}
+      <AnimatePresence>
+        {spawnOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden border-b border-border"
+          >
+            <div className="p-2 space-y-1">
+              <div className="text-[9px] uppercase tracking-wider text-muted-foreground/60 font-medium px-0.5">
+                Spawn persona
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                {DEFAULT_PERSONAS.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => { createChat(p.id); setSpawnOpen(false) }}
+                    style={{ borderLeftColor: p.color, borderLeftWidth: 2 }}
+                    className="flex items-center gap-1 px-1.5 py-1 rounded border border-border hover:bg-accent/30 transition text-left text-[10px]"
+                  >
+                    <span className="text-sm">{p.emoji}</span>
+                    <div className="overflow-hidden min-w-0">
+                      <div className="font-medium truncate">{p.name}</div>
+                      <div className="text-[9px] text-muted-foreground truncate">{p.description.slice(0, 22)}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Search */}
       <div className="px-2 pt-2 pb-1">
         <div className="relative">
-          <AppIcon name="search" width={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <AppIcon name="search" width={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -144,18 +188,14 @@ export function AgentSidebar({ streaming, building }: AgentSidebarProps) {
           </div>
         )}
 
-        {grouped.today.length > 0 && (
-          <GroupLabel>Today</GroupLabel>
-        )}
+        {grouped.today.length > 0 && <GroupLabel>Today</GroupLabel>}
         {grouped.today.map((c) => (
           <ChatRow
-            key={c.id}
-            chat={c}
+            key={c.id} chat={c}
             isActive={c.id === activeChatId}
             isStreaming={(streaming || building) && c.id === activeChatId}
             isRenaming={renamingId === c.id}
-            renameValue={renameValue}
-            renameRef={renameRef}
+            renameValue={renameValue} renameRef={renameRef}
             onSelect={() => setActiveChatId(c.id)}
             onArchive={(e) => archiveChat(c.id, e)}
             onRenameStart={(e) => startRename(c.id, c.name, e)}
@@ -164,18 +204,14 @@ export function AgentSidebar({ streaming, building }: AgentSidebarProps) {
           />
         ))}
 
-        {grouped.older.length > 0 && (
-          <GroupLabel>Earlier</GroupLabel>
-        )}
+        {grouped.older.length > 0 && <GroupLabel>Earlier</GroupLabel>}
         {grouped.older.map((c) => (
           <ChatRow
-            key={c.id}
-            chat={c}
+            key={c.id} chat={c}
             isActive={c.id === activeChatId}
             isStreaming={(streaming || building) && c.id === activeChatId}
             isRenaming={renamingId === c.id}
-            renameValue={renameValue}
-            renameRef={renameRef}
+            renameValue={renameValue} renameRef={renameRef}
             onSelect={() => setActiveChatId(c.id)}
             onArchive={(e) => archiveChat(c.id, e)}
             onRenameStart={(e) => startRename(c.id, c.name, e)}
@@ -202,7 +238,7 @@ interface ChatRowProps {
   isStreaming: boolean
   isRenaming: boolean
   renameValue: string
-  renameRef: React.RefObject<HTMLInputElement>
+  renameRef: React.RefObject<HTMLInputElement | null>
   onSelect: () => void
   onArchive: (e: React.MouseEvent) => void
   onRenameStart: (e: React.MouseEvent) => void
@@ -216,7 +252,6 @@ function ChatRow({
   onSelect, onArchive, onRenameStart, onRenameChange, onRenameCommit,
 }: ChatRowProps) {
   const persona = DEFAULT_PERSONAS.find((p) => p.id === chat.agentId)
-  const costHigh = (chat.totalCostUsd ?? 0) > 0.5
 
   return (
     <motion.div
@@ -233,7 +268,6 @@ function ChatRow({
           : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
       )}
     >
-      {/* Persona emoji + streaming dot */}
       <div className="relative flex-shrink-0 mt-0.5">
         <span className="text-sm leading-none">{persona?.emoji ?? "🤖"}</span>
         <AnimatePresence>
@@ -249,7 +283,6 @@ function ChatRow({
         </AnimatePresence>
       </div>
 
-      {/* Name / rename input */}
       <div className="flex-1 min-w-0">
         {isRenaming ? (
           <input
@@ -257,10 +290,7 @@ function ChatRow({
             value={renameValue}
             onChange={(e) => onRenameChange(e.target.value)}
             onBlur={onRenameCommit}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") onRenameCommit()
-              if (e.key === "Escape") onRenameCommit()
-            }}
+            onKeyDown={(e) => { if (e.key === "Enter") onRenameCommit(); if (e.key === "Escape") onRenameCommit() }}
             onClick={(e) => e.stopPropagation()}
             className="w-full bg-background border border-al-accent/60 rounded px-1 text-[11px] outline-none"
           />
@@ -268,39 +298,24 @@ function ChatRow({
           <>
             <div className="truncate text-[11px] leading-tight font-medium">{chat.name}</div>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-[9px] text-muted-foreground/60">
-                {formatTimeAgo(chat.updatedAt)}
-              </span>
+              <span className="text-[9px] text-muted-foreground/60">{formatTimeAgo(chat.updatedAt)}</span>
               {(chat.totalCostUsd ?? 0) > 0 && (
-                <span className="text-[9px] text-muted-foreground/50">
-                  ${(chat.totalCostUsd ?? 0).toFixed(3)}
-                </span>
+                <span className="text-[9px] text-muted-foreground/50">${(chat.totalCostUsd ?? 0).toFixed(3)}</span>
               )}
-              {costHigh && (
-                <Badge variant="outline" className="text-[8px] py-0 px-0.5 h-3 text-amber-400 border-amber-400/40">
-                  $$$
-                </Badge>
+              {(chat.totalCostUsd ?? 0) > 0.5 && (
+                <Badge variant="outline" className="text-[8px] py-0 px-0.5 h-3 text-amber-400 border-amber-400/40">$$$</Badge>
               )}
             </div>
           </>
         )}
       </div>
 
-      {/* Action buttons on hover */}
       {!isRenaming && (
         <div className="flex-shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={onRenameStart}
-            className="p-0.5 rounded hover:bg-foreground/10 hover:text-foreground transition"
-            title="Rename"
-          >
+          <button onClick={onRenameStart} className="p-0.5 rounded hover:bg-foreground/10 hover:text-foreground transition" title="Rename">
             <AppIcon name="edit" width={10} />
           </button>
-          <button
-            onClick={onArchive}
-            className="p-0.5 rounded hover:bg-red-500/20 hover:text-red-400 transition"
-            title="Archive"
-          >
+          <button onClick={onArchive} className="p-0.5 rounded hover:bg-red-500/20 hover:text-red-400 transition" title="Archive">
             <AppIcon name="trash" width={10} />
           </button>
         </div>

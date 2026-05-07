@@ -46,7 +46,7 @@ export function CommandPalette({ onOpenSettings }: { onOpenSettings: () => void 
   useHotkeys("meta+shift+e", (e) => { e.preventDefault(); ws.setLeftTab("files"); ws.setShowLeftSidebar(true) })
   useHotkeys("meta+shift+f", (e) => { e.preventDefault(); ws.setLeftTab("search"); ws.setShowLeftSidebar(true) })
   useHotkeys("meta+shift+g", (e) => { e.preventDefault(); ws.setLeftTab("git"); ws.setShowLeftSidebar(true) })
-  useHotkeys("meta+shift+a", (e) => { e.preventDefault(); ws.setLeftTab("agents"); ws.setShowLeftSidebar(true) })
+  useHotkeys("meta+shift+a", (e) => { e.preventDefault(); ws.setShowRightChat(!ws.showRightChat) })
   useHotkeys("meta+shift+x", (e) => { e.preventDefault(); ws.setLeftTab("plugins"); ws.setShowLeftSidebar(true) })
 
   useEffect(() => {
@@ -76,7 +76,7 @@ export function CommandPalette({ onOpenSettings }: { onOpenSettings: () => void 
       const actions: Cmd[] = [
         { id: "view:files",   category: "Views", label: "View: Explorer",        icon: "folder",   shortcut: "⌘⇧E", run: () => { ws.setLeftTab("files"); ws.setShowLeftSidebar(true); close("view:files") } },
         { id: "view:git",     category: "Views", label: "View: Source Control",  icon: "git",      shortcut: "⌘⇧G", run: () => { ws.setLeftTab("git"); ws.setShowLeftSidebar(true); close("view:git") } },
-        { id: "view:agents",  category: "Views", label: "View: Agents",          icon: "agent",    shortcut: "⌘⇧A", run: () => { ws.setLeftTab("agents"); ws.setShowLeftSidebar(true); close("view:agents") } },
+        { id: "view:chat",    category: "Views", label: "View: Agent Chat",       icon: "agent",    shortcut: "⌘⇧A", run: () => { ws.setShowRightChat(!ws.showRightChat); close("view:chat") } },
         { id: "view:plugins", category: "Views", label: "View: Plugins",         icon: "puzzle",   shortcut: "⌘⇧X", run: () => { ws.setLeftTab("plugins"); ws.setShowLeftSidebar(true); close("view:plugins") } },
         { id: "view:search",  category: "Views", label: "View: Search",          icon: "search",   shortcut: "⌘⇧F", run: () => { ws.setLeftTab("search"); ws.setShowLeftSidebar(true); close("view:search") } },
         { id: "mode:preview", category: "Center", label: "Center: Live preview", icon: "preview",  run: () => { ws.setCenterMode("preview"); ws.setActivePluginId(null); close("mode:preview") } },
