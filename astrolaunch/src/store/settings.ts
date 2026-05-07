@@ -2,11 +2,21 @@
 import { create } from "zustand"
 import { persist } from "zustand/middleware"
 
-export type AgentProvider = "gemini" | "openai" | "anthropic" | "openrouter"
-export type GeminiModel = "gemini-2.5-pro" | "gemini-2.5-flash"
+export type AgentProvider = "gemini" | "openai" | "anthropic" | "openrouter" | "ollama"
+
+export type SupportedModel =
+  | "gemini-2.5-pro" | "gemini-2.5-flash" | "gemini-2.0-flash" | "gemini-2.0-flash-lite"
+  | "claude-opus-4-5" | "claude-sonnet-4-5" | "claude-3-5-sonnet-20241022"
+  | "claude-haiku-3-5" | "claude-3-5-haiku-20241022"
+  | "ollama:llama3.2" | "ollama:llama3.1" | "ollama:deepseek-r1"
+  | "ollama:codestral" | "ollama:qwen2.5-coder" | "ollama:mistral" | "ollama:phi4"
+  | (string & Record<never, never>) // allow custom model strings
+
+/** Legacy alias kept for backwards compatibility */
+export type GeminiModel = SupportedModel
 
 export interface ThemeColors {
-  topbar: string   // HSL components: "240 6% 10%"
+  topbar: string
   sidebar: string
   panel: string
   canvas: string
@@ -15,22 +25,17 @@ export interface ThemeColors {
 }
 
 export interface RetryPolicy {
-  /** Max automatic retries on a tool call before bubbling the error to the agent. */
   maxRetries: number
-  /** Backoff base in ms (exponential: base * 2^attempt). */
   backoffMs: number
-  /** Hard timeout per tool call. */
   timeoutMs: number
 }
 
 export interface SettingsState {
-  // General
   showStatusBar: boolean
   showMinimap: boolean
   autoSave: boolean
   autoSaveDelay: number
   showTerminal: boolean
-  // Appearance
   themeMode: "dark" | "light" | "system"
   fontFamily: string
   monoFontFamily: string
@@ -38,30 +43,27 @@ export interface SettingsState {
   uiDensity: "compact" | "comfortable" | "spacious"
   borderRadius: number
   colors: ThemeColors
-  // Agents
   defaultProvider: AgentProvider
-  defaultModel: GeminiModel
+  defaultModel: SupportedModel
+  /** Ollama server base URL */
+  ollamaEndpoint: string
   apiKeys: Partial<Record<AgentProvider, string>>
   systemPrompt: string
   maxIterations: number
   enablePlanner: boolean
-  /** Stream agent assistant tokens to the UI. */
   streamAgent: boolean
-  /** Show inline tool diffs in messages. */
   showToolDiffs: boolean
-  /** Retry policy for tool calls. */
+  /** Show agent reasoning/thinking blocks in chat */
+  showThinking: boolean
+  /** Delay (ms) between orchestrator iterations — prevents rate limiting */
+  iterationDelayMs: number
   retry: RetryPolicy
-  /** Hard cap on cost per /build run (USD). 0 = no limit. */
   costCapUsd: number
-  // Editor
   rainbowBrackets: boolean
   wordWrap: boolean
   tabSize: number
-  /** Enable AI inline edits (⌘I in editor). */
   aiInlineEdit: boolean
-  // Plugins
   pluginsEnabled: boolean
-  // Actions
   set: <K extends keyof SettingsState>(k: K, v: SettingsState[K]) => void
   setColor: (k: keyof ThemeColors, v: string) => void
   setApiKey: (provider: AgentProvider, key: string) => void
@@ -92,14 +94,17 @@ const DEFAULTS = {
   borderRadius: 0.6,
   colors: DEFAULT_COLORS,
   defaultProvider: "gemini" as const,
-  defaultModel: "gemini-2.5-pro" as const,
-  apiKeys: {},
+  defaultModel: "gemini-2.5-pro" as SupportedModel,
+  ollamaEndpoint: "http://localhost:11434",
+  apiKeys: {} as Partial<Record<AgentProvider, string>>,
   systemPrompt:
     "You are an elite full-stack engineer agent inside the AstroLaunch IDE. Plan in small, verifiable steps. Mark each step is_done:true only after concrete output exists.",
   maxIterations: 12,
   enablePlanner: true,
   streamAgent: true,
   showToolDiffs: true,
+  showThinking: true,
+  iterationDelayMs: 300,
   retry: { maxRetries: 2, backoffMs: 600, timeoutMs: 60_000 } as RetryPolicy,
   costCapUsd: 1.5,
   rainbowBrackets: true,
@@ -119,11 +124,10 @@ export const useSettings = create<SettingsState>()(
       setRetry: (patch) => set((s) => ({ retry: { ...s.retry, ...patch } })),
       reset: () => set(DEFAULTS),
     }),
-    { name: "astrolaunch.settings.v2" }
+    { name: "astrolaunch.settings.v3" }
   )
 )
 
-/** Apply CSS variables from settings to <html> */
 export function applySettingsToDOM(s: SettingsState) {
   if (typeof document === "undefined") return
   const r = document.documentElement
@@ -137,11 +141,9 @@ export function applySettingsToDOM(s: SettingsState) {
   r.style.setProperty("--font-sans", `"${s.fontFamily}"`)
   r.style.setProperty("--font-mono", `"${s.monoFontFamily}"`)
   r.style.fontSize = `${s.fontSize}px`
-  // Theme mode w/ "system" support
   const mode = s.themeMode === "system"
     ? (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light")
     : s.themeMode
   r.classList.toggle("dark", mode === "dark")
-  // UI density → CSS variable for component padding
   r.style.setProperty("--al-density", s.uiDensity === "compact" ? "0.85" : s.uiDensity === "spacious" ? "1.15" : "1")
 }

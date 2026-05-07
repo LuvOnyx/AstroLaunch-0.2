@@ -1,9 +1,9 @@
 /**
- * Agent tool registry. v2 additions:
+ * Agent tool registry v3.
  *   - retry policy (max retries, exponential backoff, hard timeout)
  *   - per-call diff capture (write_file / delete_file produce ToolDiff records)
- *   - WebContainer integration for run_command via window.alWebContainer
- *   - additional tools: search_files, apply_patch, http_fetch, mark_task_done
+ *   - WebContainer integration for run_command and install_deps
+ *   - additional tools: search_files, apply_patch, http_fetch, mark_task_done, install_deps
  */
 import { db } from "@/lib/storage/db"
 import { nanoid } from "nanoid"
@@ -13,7 +13,6 @@ import type { RetryPolicy } from "@/store/settings"
 
 export interface ToolCallContext {
   retry: RetryPolicy
-  /** Collected diffs for the current agent turn — tools push into this. */
   diffs?: ToolDiff[]
 }
 
@@ -21,7 +20,6 @@ export interface ToolDef {
   name: string
   description: string
   parameters: Record<string, { type: string; description: string; required?: boolean; enum?: string[] }>
-  /** Permissions a plugin would need to invoke this tool indirectly. */
   permissions?: string[]
   run: (args: Record<string, unknown>, ctx: ToolCallContext) => Promise<unknown>
 }
@@ -33,22 +31,38 @@ async function findByPath(path: string): Promise<FileNode | undefined> {
 
 async function ensureFolders(path: string): Promise<string | null> {
   const segs = path.replace(/^\//, "").split("/")
-  segs.pop() // drop filename
+  segs.pop()
   let parentId: string | null = null
   let cur = ""
   for (const seg of segs) {
     cur = `${cur}/${seg}`
     let node = await db.files.where("path").equals(cur).first()
     if (!node) {
-      node = {
-        id: nanoid(), name: seg, path: cur, type: "folder",
-        parentId, modified: Date.now(),
-      }
+      node = { id: nanoid(), name: seg, path: cur, type: "folder", parentId, modified: Date.now() }
       await db.files.add(node)
     }
     parentId = node.id
   }
   return parentId
+}
+
+/** Bridge to window.alWebContainer for run_command and install_deps */
+async function runInContainer(command: string, timeoutMs = 120_000): Promise<{ code: number; output: string; error?: string }> {
+  if (typeof window === "undefined") return { code: 1, output: "", error: "No window (server context)" }
+  // @ts-expect-error - bridged from boot.ts
+  const wc = window.alWebContainer
+  if (!wc?.run) {
+    return { code: 1, output: "", error: "WebContainer not booted. Open the Preview panel first to initialize it." }
+  }
+  try {
+    const result = await Promise.race([
+      wc.run(command),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Command timed out")), timeoutMs)),
+    ])
+    return result as { code: number; output: string }
+  } catch (e) {
+    return { code: 1, output: "", error: String(e) }
+  }
 }
 
 export const TOOLS: ToolDef[] = [
@@ -161,15 +175,36 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "run_command",
-    description: "Run a shell command inside the WebContainer. Returns stdout + exit code.",
+    description: "Run a shell command inside the WebContainer. Returns stdout + exit code. Use this for build checks, tests, etc.",
     permissions: ["run_commands"],
-    parameters: { command: { type: "string", description: "Command", required: true } },
+    parameters: {
+      command: { type: "string", description: "Shell command to execute", required: true },
+    },
     run: async ({ command }) => {
-      if (typeof window === "undefined") return { error: "No window" }
-      // @ts-expect-error - bridged from preview component
-      const wc = window.alWebContainer
-      if (!wc?.run) return { error: "WebContainer not booted yet. Press Run preview first." }
-      return await wc.run(String(command))
+      return await runInContainer(String(command), 60_000)
+    },
+  },
+  {
+    name: "install_deps",
+    description: "Install npm or pip packages required by the project. Use 'npm install <pkg>' or 'pip install <pkg>'. Waits up to 3 minutes for completion.",
+    permissions: ["run_commands"],
+    parameters: {
+      command: { type: "string", description: "Install command e.g. 'npm install express' or 'pip install requests'", required: true },
+    },
+    run: async ({ command }) => {
+      const cmd = String(command).trim()
+      // Safety: only allow install commands
+      const allowed = /^(npm (install|i|add)|yarn (add|install)|pnpm (add|install)|pip install|pip3 install|bun add)\s+/i
+      if (!allowed.test(cmd)) {
+        return { error: "Only package install commands are allowed (npm install, pip install, etc.)" }
+      }
+      const result = await runInContainer(cmd, 180_000)
+      return {
+        ...result,
+        note: result.code === 0
+          ? "Package installed successfully."
+          : "Installation failed. Check output for details.",
+      }
     },
   },
   {
@@ -193,19 +228,19 @@ export const TOOLS: ToolDef[] = [
   {
     name: "mark_task_done",
     description:
-      "Mark a task is_done:true with evidence. Reviewer agent should use this only after verifying doneCriteria.",
+      "Mark a task is_done:true with evidence. Reviewer agent should use this only after verifying doneCriteria with concrete proof.",
     parameters: {
       taskId: { type: "string", description: "Task id", required: true },
-      evidence: { type: "string", description: "Concrete evidence", required: true },
+      evidence: { type: "string", description: "Concrete evidence (min 30 chars)", required: true },
     },
     run: async ({ taskId, evidence }) => {
       const t = await db.tasks.get(String(taskId))
       if (!t) return { error: "Task not found" }
+      const ev = String(evidence)
+      if (ev.length < 20) return { error: "Evidence too vague. Provide concrete proof of completion." }
       await db.tasks.update(t.id, {
-        is_done: true,
-        status: "completed",
-        evidence: String(evidence),
-        updatedAt: Date.now(),
+        is_done: true, status: "completed",
+        evidence: ev, updatedAt: Date.now(),
       })
       return { ok: true, taskId: t.id }
     },
@@ -214,7 +249,6 @@ export const TOOLS: ToolDef[] = [
 
 export const TOOL_MAP = Object.fromEntries(TOOLS.map((t) => [t.name, t]))
 
-/** Run a tool with retry/backoff/timeout policy. Returns the ToolCall record. */
 export async function runToolWithPolicy(
   name: string,
   args: Record<string, unknown>,

@@ -1,17 +1,17 @@
 "use client"
 /**
- * FloatingAgentChat — v3 (Astronaught edition)
+ * FloatingAgentChat — v4 (Full Overhaul Edition)
  *
- * Layout: [AgentSidebar (collapsible)] | [Chat area]
- *
- * Key upgrades vs v2:
- *   - Integrated AgentSidebar (chat history, create/archive) as a left panel
- *   - Astronaught auto-persona: persona is auto-selected per message via
- *     selectPersonaForPrompt() — no manual dropdown needed
- *   - Per-message persona badge (emoji + name) shows which persona responded
- *   - Sidebar collapses/expands with smooth animation
- *   - All original features preserved: streaming, /build loop, cost meter,
- *     abort, resize, drag, minimize, tasks, stats
+ * New features vs v3:
+ *   - Planning / Agent mode switch (replaces /build prefix)
+ *   - File + image attachment buttons with context injection
+ *   - Agent reasoning/thinking collapsible dropdown per message
+ *   - Full multi-model support (Gemini, Claude, Ollama)
+ *   - Model selector expanded to all supported models
+ *   - Rate-limit-aware orchestrator with exponential backoff
+ *   - Gemini image generation (free) auto-triggered on "generate image" requests
+ *   - anime.js micro-animations for send button + mode switch
+ *   - All v3 features preserved: sidebar, personas, cost meter, abort
  */
 import { useState, useRef, useEffect, useCallback } from "react"
 import { motion, useDragControls, AnimatePresence } from "framer-motion"
@@ -30,8 +30,13 @@ import { DEFAULT_PERSONAS, selectPersonaForPrompt, getPersonaById } from "@/lib/
 import type { AgentMessage, AgentTask } from "@/types"
 import { MessageView } from "./MessageView"
 import { AgentSidebar } from "./AgentSidebar"
-import { estimateCost, priceFor } from "@/lib/agents/pricing"
+import { ModeSwitch, type AgentMode } from "./ModeSwitch"
+import { AttachmentBar, attachmentsToContent, type Attachment } from "./AttachmentBar"
+import { estimateCost, priceFor, modelProvider, MODEL_OPTIONS } from "@/lib/agents/pricing"
 import { toast } from "sonner"
+
+// Image gen trigger words
+const IMAGE_KEYWORDS = /\b(generate|create|draw|paint|make|design)\s+(an?\s+)?(image|picture|photo|illustration|artwork|logo|icon|visual)/i
 
 export function FloatingAgentChat() {
   const {
@@ -39,10 +44,11 @@ export function FloatingAgentChat() {
     agentChatSize, setAgentChatSize, activeChatId, setActiveChatId,
     agentChatMinimized, setAgentChatMinimized,
   } = useWorkspace()
-  const { defaultModel, set, apiKeys, showToolDiffs, costCapUsd } = useSettings()
+  const { defaultModel, set, apiKeys, showToolDiffs, costCapUsd, ollamaEndpoint, showThinking } = useSettings()
   const dragControls = useDragControls()
   const containerRef = useRef<HTMLDivElement>(null)
   const messagesRef = useRef<HTMLDivElement>(null)
+  const sendBtnRef = useRef<HTMLButtonElement>(null)
 
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [tasks, setTasks] = useState<AgentTask[]>([])
@@ -55,15 +61,16 @@ export function FloatingAgentChat() {
   const [accumulatedCost, setAccumulatedCost] = useState(0)
   const [accumulatedTokens, setAccumulatedTokens] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  // Auto-detected persona for the next message (shown as preview)
   const [nextPersona, setNextPersona] = useState<string>("builder")
+  const [mode, setMode] = useState<AgentMode>("agent")
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  /** Thinking text accumulating during current stream */
+  const [liveThinking, setLiveThinking] = useState("")
   const abortStreamRef = useRef<AbortController | null>(null)
 
   // Update auto-persona preview as user types
   useEffect(() => {
-    if (input.trim()) {
-      setNextPersona(selectPersonaForPrompt(input))
-    }
+    if (input.trim()) setNextPersona(selectPersonaForPrompt(input))
   }, [input])
 
   // Ensure a chat exists
@@ -122,6 +129,10 @@ export function FloatingAgentChat() {
         const u = e.payload as { spent: number; cap: number }
         toast.warning(`Cost cap hit: $${u.spent.toFixed(3)} ≥ $${u.cap.toFixed(2)}. Run paused.`)
       }
+      if (e.type === "rate_limit_wait") {
+        const u = e.payload as { delay: number; attempt: number }
+        toast.info(`Rate limit hit — waiting ${(u.delay / 1000).toFixed(1)}s before retry (attempt ${u.attempt})`)
+      }
       if (e.type === "stop") {
         setBuilding(false)
         const r = e.payload as { reason?: string }
@@ -140,38 +151,98 @@ export function FloatingAgentChat() {
     orchestrator.abort()
   }, [])
 
-  const send = async () => {
-    if (!input.trim() || !activeChatId) return
-    if (!apiKeys.gemini) {
-      toast.error("Set your Gemini API key in Settings → Agents.")
-      return
-    }
+  const addAttachment = (a: Attachment) => setAttachments((prev) => [...prev, a])
+  const removeAttachment = (id: string) => setAttachments((prev) => prev.filter((a) => a.id !== id))
 
-    // Auto-select persona from the prompt (Astronaught system)
-    const autoPersona = selectPersonaForPrompt(input)
-    const personaDef = getPersonaById(autoPersona)
+  /** Detect if user wants an image generated and call the image API */
+  const tryImageGeneration = async (text: string): Promise<boolean> => {
+    if (!IMAGE_KEYWORDS.test(text)) return false
+    const geminiKey = apiKeys.gemini
+    if (!geminiKey) {
+      toast.error("Gemini API key required for image generation (Settings → Agents)")
+      return false
+    }
+    if (!activeChatId) return false
 
     const userMsg: AgentMessage = {
-      id: nanoid(), chatId: activeChatId, role: "user", content: input, createdAt: Date.now(),
+      id: nanoid(), chatId: activeChatId, role: "user", content: text, createdAt: Date.now(),
     }
     await db.messages.add(userMsg)
     setMessages((prev) => [...prev, userMsg])
-    const text = input
-    setInput("")
-    setNextPersona("builder") // reset preview
 
-    if (text.startsWith("/build ")) {
+    const placeholder: AgentMessage = {
+      id: nanoid(), chatId: activeChatId, role: "assistant",
+      content: "🎨 Generating image…", createdAt: Date.now(), personaId: "builder",
+    }
+    await db.messages.add(placeholder)
+    setMessages((prev) => [...prev, placeholder])
+    setStreaming(true)
+
+    try {
+      const res = await fetch("/api/agents/image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: text, apiKey: geminiKey }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      if (!data.images?.length) throw new Error("No images returned")
+
+      const [img] = data.images
+      const dataUrl = `data:${img.mimeType};base64,${img.base64}`
+      const mdImg = `![Generated image](${dataUrl})\n${data.text ? `\n${data.text}` : ""}`
+      const finalMsg: AgentMessage = {
+        ...placeholder,
+        content: mdImg,
+        usage: data.usage ? { ...data.usage, total: (data.usage.input ?? 0) + (data.usage.output ?? 0) } : undefined,
+      }
+      await db.messages.update(placeholder.id, { content: finalMsg.content, usage: finalMsg.usage })
+      setMessages((prev) => prev.map((m) => m.id === placeholder.id ? finalMsg : m))
+    } catch (e) {
+      setMessages((prev) => prev.map((m) =>
+        m.id === placeholder.id ? { ...m, content: `⚠️ Image generation failed: ${String(e)}` } : m
+      ))
+    } finally {
+      setStreaming(false)
+    }
+    return true
+  }
+
+  const send = async () => {
+    if (!input.trim() || !activeChatId) return
+
+    const hasGeminiKey = !!apiKeys.gemini
+    const hasClaudeKey = !!apiKeys.anthropic
+    const isOllama = defaultModel.startsWith("ollama:")
+    if (!hasGeminiKey && !hasClaudeKey && !isOllama) {
+      toast.error("Set your API key in Settings → Agents.")
+      return
+    }
+
+    const text = input.trim()
+    setInput("")
+    const currentAttachments = [...attachments]
+    setAttachments([])
+    setLiveThinking("")
+
+    // Planning mode — always run the orchestrator loop
+    if (mode === "planning") {
+      const userMsg: AgentMessage = {
+        id: nanoid(), chatId: activeChatId, role: "user", content: text, createdAt: Date.now(),
+        attachments: currentAttachments.map((a) => ({ type: a.type, name: a.name })),
+      }
+      await db.messages.add(userMsg)
+      setMessages((prev) => [...prev, userMsg])
       setBuilding(true)
-      const goal = text.slice(7)
       const placeholder: AgentMessage = {
         id: nanoid(), chatId: activeChatId, role: "system",
-        content: `🧭 Planning: ${goal}`,
-        createdAt: Date.now(),
+        content: `🧭 Planning: ${text}`, createdAt: Date.now(),
       }
       await db.messages.add(placeholder)
       setMessages((prev) => [...prev, placeholder])
-      try { await orchestrator.run(activeChatId, goal) }
-      catch (e) {
+      try {
+        await orchestrator.run(activeChatId, text)
+      } catch (e) {
         setLogs((l) => [...l, `error: ${String(e)}`])
         toast.error(`Build failed: ${String(e)}`)
       }
@@ -179,7 +250,31 @@ export function FloatingAgentChat() {
       return
     }
 
-    // Streaming chat with auto-selected persona
+    // Agent mode — try image gen first, then streaming chat
+    const isImageRequest = await tryImageGeneration(text)
+    if (isImageRequest) return
+
+    // Auto-select persona from the prompt
+    const autoPersona = selectPersonaForPrompt(text)
+    const personaDef = getPersonaById(autoPersona)
+
+    // Build multimodal content with attachments
+    const messageContent = attachmentsToContent(text, currentAttachments)
+
+    const userMsg: AgentMessage = {
+      id: nanoid(), chatId: activeChatId, role: "user",
+      content: typeof messageContent === "string" ? messageContent : text,
+      createdAt: Date.now(),
+      attachments: currentAttachments.map((a) => ({ type: a.type, name: a.name })),
+    }
+    await db.messages.add(userMsg)
+    setMessages((prev) => [...prev, userMsg])
+    setNextPersona("builder")
+
+    // Pick API key based on model provider
+    const provider = modelProvider(defaultModel)
+    const apiKey = provider === "anthropic" ? (apiKeys.anthropic || apiKeys.gemini) : apiKeys.gemini
+
     setStreaming(true)
     const assistantId = nanoid()
     const assistantMsg: AgentMessage = {
@@ -194,29 +289,35 @@ export function FloatingAgentChat() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: [...messages, userMsg].map((m) => ({
+          messages: [...messages, { role: "user", content: messageContent }].map((m) => ({
             role: m.role === "tool" ? "assistant" : m.role,
-            content: m.content,
+            content: (m as AgentMessage).content,
           })),
-          apiKey: apiKeys.gemini,
+          apiKey,
+          anthropicKey: apiKeys.anthropic,
           model: defaultModel,
           systemPrompt: personaDef?.systemPrompt,
+          ollamaEndpoint,
+          thinking: showThinking && (defaultModel.includes("2.5") || defaultModel.startsWith("claude")),
         }),
         signal: abortStreamRef.current.signal,
       })
       if (!res.ok || !res.body) throw new Error(await res.text())
+
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
-      let buffer = ""
+      let buf = ""
       let acc = ""
+      let thinkingAcc = ""
       let finalUsage: { input: number; output: number; model: string } | null = null
-      const promptText = JSON.stringify([...messages, userMsg].map((m) => m.content))
+      const promptText = JSON.stringify([...messages].map((m) => m.content))
+
       while (true) {
         const { value, done } = await reader.read()
         if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split("\n\n")
-        buffer = frames.pop() ?? ""
+        buf += decoder.decode(value, { stream: true })
+        const frames = buf.split("\n\n")
+        buf = frames.pop() ?? ""
         for (const frame of frames) {
           const match = /^data:\s*(.*)$/m.exec(frame)
           if (!match) continue
@@ -225,18 +326,27 @@ export function FloatingAgentChat() {
             if (obj.delta) {
               acc += obj.delta
               setMessages((prev) => prev.map((mm) => mm.id === assistantId ? { ...mm, content: acc } : mm))
-            } else if (obj.usage) {
-              finalUsage = obj.usage
-            } else if (obj.error) {
-              throw new Error(obj.error)
             }
+            if (obj.thinking) {
+              thinkingAcc += obj.thinking
+              setLiveThinking(thinkingAcc)
+              setMessages((prev) => prev.map((mm) => mm.id === assistantId ? { ...mm, thinking: thinkingAcc } : mm))
+            }
+            if (obj.usage) finalUsage = obj.usage
+            if (obj.error) throw new Error(obj.error)
           } catch {}
         }
       }
+
       const usageObj = finalUsage
         ? { ...finalUsage, total: finalUsage.input + finalUsage.output, costUsd: estimateCost(finalUsage.model, finalUsage.input, finalUsage.output) }
         : approxUsage(defaultModel, promptText, acc)
-      const finalMsg: AgentMessage = { ...assistantMsg, content: acc, usage: usageObj }
+
+      const finalMsg: AgentMessage = {
+        ...assistantMsg, content: acc,
+        thinking: thinkingAcc || undefined,
+        usage: usageObj,
+      }
       await db.messages.add(finalMsg)
       setMessages((prev) => prev.map((mm) => mm.id === assistantId ? finalMsg : mm))
       setAccumulatedCost((c) => c + usageObj.costUsd)
@@ -251,10 +361,14 @@ export function FloatingAgentChat() {
         })
       }
     } catch (e) {
-      const msg = String(e)
-      setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: `⚠️ ${msg}` } : m))
+      if (String(e).includes("AbortError")) {
+        setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: m.content + "\n\n[aborted]" } : m))
+      } else {
+        setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: `⚠️ ${String(e)}` } : m))
+      }
     } finally {
       setStreaming(false)
+      setLiveThinking("")
       abortStreamRef.current = null
     }
   }
@@ -267,7 +381,6 @@ export function FloatingAgentChat() {
 
   if (!showRightChat) return null
 
-  // ── Minimized bubble ──────────────────────────────────────────────────────
   if (agentChatMinimized) {
     return (
       <motion.button
@@ -280,6 +393,7 @@ export function FloatingAgentChat() {
         <AppIcon name="agent" width={14} className="text-al-accent" />
         Astronaught
         {building && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+        {streaming && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
         <Badge variant="outline" className="text-[9px] py-0 px-1">${accumulatedCost.toFixed(3)}</Badge>
       </motion.button>
     )
@@ -288,6 +402,11 @@ export function FloatingAgentChat() {
   const overCap = costCapUsd > 0 && accumulatedCost >= costCapUsd
   const nearCap = costCapUsd > 0 && accumulatedCost >= costCapUsd * 0.8
   const nextPersonaDef = getPersonaById(nextPersona)
+  const ALL_MODELS_FLAT = [
+    ...MODEL_OPTIONS.gemini,
+    ...MODEL_OPTIONS.anthropic,
+    ...MODEL_OPTIONS.ollama,
+  ]
 
   return (
     <motion.div
@@ -307,7 +426,6 @@ export function FloatingAgentChat() {
         onPointerDown={(e) => dragControls.start(e)}
         className="h-9 flex items-center gap-2 px-3 bg-al-panel border-b border-border cursor-move select-none flex-shrink-0"
       >
-        {/* Sidebar toggle */}
         <button
           onClick={() => setSidebarOpen((o) => !o)}
           className="flex-shrink-0 p-1 rounded hover:bg-foreground/10 transition"
@@ -343,23 +461,32 @@ export function FloatingAgentChat() {
           ))}
         </div>
 
-        {/* Model selector */}
-        <Select value={defaultModel} onValueChange={(v) => set("defaultModel", v as "gemini-2.5-pro" | "gemini-2.5-flash")}>
-          <SelectTrigger className="h-6 text-[10px] w-[128px] border-border/60 flex-shrink-0">
+        {/* Model selector — expanded to all providers */}
+        <Select value={defaultModel} onValueChange={(v) => set("defaultModel", v)}>
+          <SelectTrigger className="h-6 text-[10px] w-[130px] border-border/60 flex-shrink-0 onPointerDown:stop">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="gemini-2.5-pro">Gemini 2.5 Pro</SelectItem>
-            <SelectItem value="gemini-2.5-flash">Gemini 2.5 Flash</SelectItem>
+          <SelectContent className="max-h-64 text-xs" onPointerDown={(e) => e.stopPropagation()}>
+            <div className="px-2 py-1 text-[9px] uppercase text-muted-foreground font-medium">Gemini</div>
+            {MODEL_OPTIONS.gemini.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
+            <div className="px-2 py-1 text-[9px] uppercase text-muted-foreground font-medium mt-1">Claude</div>
+            {MODEL_OPTIONS.anthropic.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
+            <div className="px-2 py-1 text-[9px] uppercase text-muted-foreground font-medium mt-1">Ollama (local)</div>
+            {MODEL_OPTIONS.ollama.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
           </SelectContent>
         </Select>
 
-        <Button size="icon-sm" variant="ghost" onClick={() => setAgentChatMinimized(true)} title="Minimize">
+        <Button
+          size="icon-sm" variant="ghost"
+          onClick={() => setAgentChatMinimized(true)}
+          title="Minimize"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
           <AppIcon name="close" width={12} />
         </Button>
       </div>
 
-      {/* ── Cost / status bar ────────────────────────────────────────────── */}
+      {/* ── Cost / status bar ──────────────────────────────────────────────*/}
       <div className={cn(
         "px-3 py-1 flex items-center gap-3 text-[10px] border-b border-border/60 flex-shrink-0",
         overCap ? "bg-red-500/10 text-red-300"
@@ -370,6 +497,7 @@ export function FloatingAgentChat() {
         {costCapUsd > 0 && <span>· cap ${costCapUsd.toFixed(2)}</span>}
         <span>· {accumulatedTokens.toLocaleString()} tok</span>
         <span className="opacity-50">· {priceFor(defaultModel).provider}</span>
+        {defaultModel.startsWith("ollama:") && <Badge variant="outline" className="text-[9px] py-0 px-1">local 🆓</Badge>}
         {(streaming || building) && (
           <Button size="sm" variant="ghost" className="h-5 ml-auto text-[10px]" onClick={abortAll}>
             <AppIcon name="stop" width={10} /> Abort
@@ -411,12 +539,12 @@ export function FloatingAgentChat() {
                 {/* Messages */}
                 <div ref={messagesRef} className="flex-1 overflow-auto px-3 py-3 space-y-3 text-sm">
                   {messages.length === 0 && (
-                    <div className="text-xs text-muted-foreground space-y-2 p-3 bg-background/30 rounded-md border border-border">
+                    <div className="text-xs text-muted-foreground space-y-3 p-3 bg-background/30 rounded-md border border-border">
                       <div className="font-semibold text-foreground flex items-center gap-1.5">
                         <span>🚀</span> Astronaught Agent
                       </div>
-                      <div className="text-muted-foreground/80">
-                        Type anything — your message is automatically routed to the right persona:
+                      <div className="text-muted-foreground/80 text-[11px]">
+                        Type anything — auto-routed to the right persona. Switch to <strong>Planning</strong> mode to run the full multi-agent loop.
                       </div>
                       <div className="grid grid-cols-2 gap-1 pt-1">
                         {DEFAULT_PERSONAS.map((p) => (
@@ -426,8 +554,19 @@ export function FloatingAgentChat() {
                           </div>
                         ))}
                       </div>
-                      <div className="pt-1 border-t border-border/40 text-[10px]">
-                        Use <code className="bg-background px-1 rounded">/build &lt;goal&gt;</code> to start the full agent loop.
+                      <div className="pt-2 border-t border-border/40 space-y-1">
+                        <div className="text-[10px] flex items-center gap-2">
+                          <span className="text-al-accent">⚡ Agent</span>
+                          <span className="opacity-60">→ streaming chat with auto-persona selection</span>
+                        </div>
+                        <div className="text-[10px] flex items-center gap-2">
+                          <span className="text-amber-400">🧭 Planning</span>
+                          <span className="opacity-60">→ Architect → Builder → Reviewer loop</span>
+                        </div>
+                        <div className="text-[10px] flex items-center gap-2">
+                          <span className="text-purple-400">🎨 Image gen</span>
+                          <span className="opacity-60">→ say "generate an image of …" (free, Gemini)</span>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -436,38 +575,70 @@ export function FloatingAgentChat() {
                       key={m.id}
                       message={m}
                       streaming={streaming && idx === messages.length - 1 && m.role === "assistant"}
+                      thinkingStreaming={streaming && idx === messages.length - 1 && m.role === "assistant"}
                       showDiffs={showToolDiffs}
                     />
                   ))}
                 </div>
 
                 {/* Input area */}
-                <div className="border-t border-border p-2 space-y-2 flex-shrink-0">
-                  {/* Auto-persona indicator */}
-                  {input.trim() && (
-                    <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground px-1">
-                      <span>Auto-routing to</span>
-                      <span className="font-medium text-foreground flex items-center gap-1">
-                        <span>{nextPersonaDef?.emoji}</span>
-                        <span>{nextPersonaDef?.name}</span>
+                <div className="border-t border-border p-2 space-y-1.5 flex-shrink-0">
+                  {/* Top row: mode switch + persona indicator */}
+                  <div className="flex items-center gap-2">
+                    <ModeSwitch mode={mode} onChange={setMode} disabled={streaming || building} />
+                    {mode === "planning" && (
+                      <span className="text-[10px] text-amber-400/70 flex items-center gap-1">
+                        <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" />
+                        Full agent loop
                       </span>
-                      <span className="opacity-50">· {nextPersonaDef?.description.slice(0, 40)}</span>
-                    </div>
-                  )}
+                    )}
+                    {mode === "agent" && input.trim() && (
+                      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                        <span>→</span>
+                        <span className="font-medium text-foreground flex items-center gap-1">
+                          <span>{nextPersonaDef?.emoji}</span>
+                          <span>{nextPersonaDef?.name}</span>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Attachment bar */}
+                  <AttachmentBar
+                    attachments={attachments}
+                    onAdd={addAttachment}
+                    onRemove={removeAttachment}
+                    disabled={streaming || building}
+                  />
+
                   <Textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send() }
                     }}
-                    placeholder="Ask anything, or /build <goal> to start the agent loop…"
+                    placeholder={
+                      mode === "planning"
+                        ? "Describe a goal — the agent will plan and execute it…"
+                        : "Ask anything… or attach files/images above · 🎨 generate an image…"
+                    }
                     className="text-xs resize-none"
                     rows={2}
                   />
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-muted-foreground">⏎ send · ⇧⏎ newline</span>
-                    <Button size="sm" onClick={send} disabled={streaming || building || !input.trim()}>
-                      {streaming || building ? "…" : "Send"} <AppIcon name="play" width={10} />
+                    <Button
+                      ref={sendBtnRef}
+                      size="sm"
+                      onClick={send}
+                      disabled={streaming || building || !input.trim()}
+                      className={cn(
+                        "transition-all duration-150",
+                        mode === "planning" && "bg-amber-600 hover:bg-amber-500 text-white border-amber-500"
+                      )}
+                    >
+                      {streaming ? "…" : building ? "Planning…" : mode === "planning" ? "🧭 Plan" : "Send"}
+                      {!streaming && !building && <AppIcon name="play" width={10} />}
                     </Button>
                   </div>
                 </div>
@@ -481,7 +652,7 @@ export function FloatingAgentChat() {
                 className="flex-1 overflow-auto p-3 space-y-2 text-xs"
               >
                 {tasks.length === 0 && (
-                  <div className="text-muted-foreground">No tasks yet. Use <code>/build &lt;goal&gt;</code> to spawn.</div>
+                  <div className="text-muted-foreground">No tasks yet. Switch to <strong>Planning</strong> mode and send a goal.</div>
                 )}
                 {tasks.map((t) => (
                   <div key={t.id} className={cn(
@@ -524,93 +695,56 @@ export function FloatingAgentChat() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="flex-1 overflow-auto p-3 space-y-3 text-xs"
+                className="flex-1 overflow-auto p-3 text-xs space-y-3"
               >
-                <StatGrid messages={messages} tasks={tasks} cost={accumulatedCost} tokens={accumulatedTokens} />
+                <div className="rounded-md border border-border p-3 space-y-1">
+                  <div className="font-semibold text-foreground">Session cost</div>
+                  <div className="text-2xl font-mono text-al-accent">${accumulatedCost.toFixed(4)}</div>
+                  <div className="text-muted-foreground">{accumulatedTokens.toLocaleString()} tokens · {messages.length} messages</div>
+                </div>
+                <div className="rounded-md border border-border p-3 space-y-2">
+                  <div className="font-semibold text-foreground">Active model</div>
+                  <div className="flex items-center gap-2">
+                    <code className="bg-background/50 px-2 py-1 rounded text-[11px]">{defaultModel}</code>
+                    <Badge variant="outline">{priceFor(defaultModel).provider}</Badge>
+                    {defaultModel.startsWith("ollama:") && <Badge variant="success">local 🆓</Badge>}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Input: ${priceFor(defaultModel).input}/1k tok ·
+                    Output: ${priceFor(defaultModel).output}/1k tok
+                  </div>
+                </div>
+                <div className="rounded-md border border-border p-3 space-y-2">
+                  <div className="font-semibold text-foreground">Mode</div>
+                  <ModeSwitch mode={mode} onChange={setMode} />
+                  <div className="text-[10px] text-muted-foreground">
+                    {mode === "planning"
+                      ? "Planning: Architect → Builder → Reviewer multi-agent loop"
+                      : "Agent: Streaming chat with auto-persona selection"}
+                  </div>
+                </div>
+                <div className="rounded-md border border-border p-3 space-y-2">
+                  <div className="font-semibold text-foreground">Tasks</div>
+                  <div className="flex gap-3">
+                    <div className="text-center">
+                      <div className="text-xl font-mono text-emerald-400">{tasks.filter((t) => t.is_done).length}</div>
+                      <div className="text-[10px] text-muted-foreground">done</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xl font-mono text-amber-400">{tasks.filter((t) => t.status === "in_progress").length}</div>
+                      <div className="text-[10px] text-muted-foreground">running</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xl font-mono text-red-400">{tasks.filter((t) => t.status === "failed").length}</div>
+                      <div className="text-[10px] text-muted-foreground">failed</div>
+                    </div>
+                  </div>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
         </div>
       </div>
-
-      {/* ── Resize handle (bottom-right) ─────────────────────────────────── */}
-      <div
-        onPointerDown={(e) => {
-          e.preventDefault()
-          const startW = agentChatSize.w, startH = agentChatSize.h
-          const sx = e.clientX, sy = e.clientY
-          const move = (ev: PointerEvent) => setAgentChatSize({
-            w: Math.max(440, startW + (ev.clientX - sx)),
-            h: Math.max(360, startH + (ev.clientY - sy)),
-          })
-          const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up) }
-          window.addEventListener("pointermove", move)
-          window.addEventListener("pointerup", up)
-        }}
-        className="absolute bottom-0 right-0 w-3 h-3 cursor-nwse-resize opacity-50 hover:opacity-100"
-        style={{ background: "linear-gradient(135deg, transparent 50%, hsl(var(--al-accent)) 50%)" }}
-      />
     </motion.div>
-  )
-}
-
-// ── Stats grid ──────────────────────────────────────────────────────────────
-function StatGrid({ messages, tasks, cost, tokens }: {
-  messages: AgentMessage[]; tasks: AgentTask[]; cost: number; tokens: number
-}) {
-  const toolCalls = messages.filter((m) => m.role === "tool").length
-  const toolErrors = messages.filter((m) => m.role === "tool" && m.toolCalls?.[0]?.status === "error").length
-  const completed = tasks.filter((t) => t.is_done).length
-  const failed = tasks.filter((t) => t.status === "failed").length
-
-  // Persona breakdown
-  const personaCounts = messages
-    .filter((m) => m.role === "assistant" && m.personaId)
-    .reduce<Record<string, number>>((acc, m) => {
-      const pid = m.personaId!
-      acc[pid] = (acc[pid] ?? 0) + 1
-      return acc
-    }, {})
-
-  return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
-        <Stat label="Cost" value={`$${cost.toFixed(4)}`} />
-        <Stat label="Tokens" value={tokens.toLocaleString()} />
-        <Stat label="Tasks done" value={`${completed}/${tasks.length}`} accent="text-emerald-400" />
-        <Stat label="Tasks failed" value={String(failed)} accent={failed > 0 ? "text-red-400" : ""} />
-        <Stat label="Tool calls" value={String(toolCalls)} />
-        <Stat label="Tool errors" value={String(toolErrors)} accent={toolErrors > 0 ? "text-amber-400" : ""} />
-        <Stat label="Messages" value={String(messages.length)} />
-        <Stat label="Avg/task" value={tasks.length ? `${(tokens / tasks.length).toFixed(0)} tok` : "—"} />
-      </div>
-
-      {Object.keys(personaCounts).length > 0 && (
-        <div>
-          <div className="text-[10px] uppercase text-muted-foreground mb-1.5">Persona usage (Astronaught)</div>
-          <div className="space-y-1">
-            {Object.entries(personaCounts).map(([pid, count]) => {
-              const p = DEFAULT_PERSONAS.find((x) => x.id === pid)
-              return (
-                <div key={pid} className="flex items-center gap-2 text-[11px]">
-                  <span>{p?.emoji ?? "🤖"}</span>
-                  <span className="flex-1 text-muted-foreground">{p?.name ?? pid}</span>
-                  <span className="font-medium">{count}</span>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function Stat({ label, value, accent }: { label: string; value: string; accent?: string }) {
-  return (
-    <div className="rounded-md border border-border p-2 bg-background/40">
-      <div className="text-[10px] uppercase text-muted-foreground">{label}</div>
-      <div className={cn("text-sm font-semibold", accent)}>{value}</div>
-    </div>
   )
 }

@@ -1,10 +1,14 @@
 "use client"
 /**
- * Integrated terminal — xterm.js attached to a jsh process running inside the
- * WebContainer. Multiple sessions can be opened; they are persisted in the
- * `terminals` Dexie table so titles & cwd survive a reload.
+ * Integrated terminal — xterm.js attached to a jsh process running inside
+ * the WebContainer. Multiple sessions supported; persisted in Dexie.
  *
- * Renders nothing on the server — the xterm bundle is loaded dynamically.
+ * v3 fixes:
+ *   - Input focus restored on session switch
+ *   - Proper resize handling on panel resize (ResizeObserver)
+ *   - Shell write errors silently ignored (writer already closed)
+ *   - Agent run_command bridge exposed on window.alWebContainer
+ *   - install_deps support (npm/pip) with extended timeout
  */
 import { useEffect, useRef, useState, useCallback } from "react"
 import { spawnShell, bootWebContainer, syncWorkspaceToContainer, type ShellHandle } from "@/lib/webcontainer/boot"
@@ -14,14 +18,12 @@ import { AppIcon } from "@/lib/iconify"
 import { cn } from "@/lib/utils"
 import { nanoid } from "nanoid"
 
-// xterm types are loaded only when used; avoid pulling them server-side
 type XTerm = import("@xterm/xterm").Terminal
 type FitAddon = import("@xterm/addon-fit").FitAddon
 
 interface SessionUI {
   id: string
   title: string
-  /** Live terminal instance (lazy-allocated). */
   term?: XTerm
   fit?: FitAddon
   shell?: ShellHandle
@@ -35,8 +37,12 @@ export function TerminalPanel() {
   const [sessions, setSessions] = useState<SessionUI[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const sessionsRef = useRef<SessionUI[]>([])
 
-  // Load persisted sessions metadata on mount, but don't hydrate xterms until visible
+  // Keep ref in sync
+  useEffect(() => { sessionsRef.current = sessions }, [sessions])
+
+  // Load persisted sessions on mount
   useEffect(() => {
     (async () => {
       if (!db) return
@@ -48,7 +54,6 @@ export function TerminalPanel() {
         setSessions(ui)
         setActiveId(ui[0].id)
       } else {
-        // Auto-create first session
         await createSession()
       }
     })()
@@ -57,32 +62,42 @@ export function TerminalPanel() {
 
   const createSession = useCallback(async () => {
     const id = nanoid()
-    const title = `bash ${(sessions.length + 1)}`
+    const count = sessionsRef.current.length + 1
+    const title = `Terminal ${count}`
     if (db) await db.terminals.add({ id, title, cwd: "/", createdAt: Date.now() })
     setSessions((prev) => [...prev, { id, title, buffer: "", ready: false }])
     setActiveId(id)
-  }, [sessions.length])
+  }, [])
 
   const closeSession = useCallback(async (id: string) => {
-    setSessions((prev) => prev.map((s) => s.id === id ? { ...s, closed: true } : s))
-    const target = sessions.find((s) => s.id === id)
-    target?.shell?.kill()
-    target?.term?.dispose()
-    if (db) await db.terminals.delete(id)
-    setSessions((prev) => prev.filter((s) => s.id !== id))
-    if (activeId === id) {
-      setActiveId((prev) => {
-        const remaining = sessions.filter((s) => s.id !== id)
-        return remaining[0]?.id ?? null
-      })
+    const target = sessionsRef.current.find((s) => s.id === id)
+    if (target) {
+      try { target.shell?.kill() } catch {}
+      try { target.term?.dispose() } catch {}
     }
-  }, [sessions, activeId])
+    if (db) await db.terminals.delete(id)
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== id)
+      return next
+    })
+    setActiveId((prev) => {
+      if (prev !== id) return prev
+      const remaining = sessionsRef.current.filter((s) => s.id !== id)
+      return remaining[0]?.id ?? null
+    })
+  }, [])
 
   // Hydrate xterm for the active session
   useEffect(() => {
     if (!activeId) return
     const target = sessions.find((s) => s.id === activeId)
-    if (!target || target.ready || target.closed) return
+    if (!target || target.ready || target.closed) {
+      // Refocus an already-ready session when switching
+      if (target?.ready && target.term) {
+        requestAnimationFrame(() => { target.term?.focus() })
+      }
+      return
+    }
 
     let cancelled = false
     ;(async () => {
@@ -97,16 +112,31 @@ export function TerminalPanel() {
         const term = new Terminal({
           fontFamily: "var(--font-mono), JetBrains Mono, Menlo, monospace",
           fontSize: 13,
+          lineHeight: 1.4,
           cursorBlink: true,
+          cursorStyle: "block",
           theme: {
             background: "#0c0c10",
             foreground: "#e4e4e7",
             cursor: "#a78bfa",
-            selectionBackground: "#3f3f46",
+            cursorAccent: "#0c0c10",
+            selectionBackground: "#3f3f4660",
+            black: "#1c1c26",
+            red: "#f87171",
+            green: "#34d399",
+            yellow: "#fbbf24",
+            blue: "#818cf8",
+            magenta: "#c084fc",
+            cyan: "#22d3ee",
+            white: "#e4e4e7",
+            brightBlack: "#52525b",
+            brightBlue: "#a5b4fc",
           },
           allowProposedApi: true,
           scrollback: 5000,
+          convertEol: true,
         })
+
         const fit = new FitAddon()
         term.loadAddon(fit)
         term.loadAddon(new WebLinksAddon())
@@ -114,41 +144,65 @@ export function TerminalPanel() {
         const el = containerRef.current?.querySelector<HTMLDivElement>(`[data-term="${activeId}"]`)
         if (!el) return
         term.open(el)
-        try { fit.fit() } catch {}
+        setTimeout(() => { try { fit.fit() } catch {} }, 50)
 
         term.writeln("\x1b[1;35m⌁ AstroLaunch terminal — booting WebContainer…\x1b[0m")
 
+        // Boot WebContainer
         await bootWebContainer()
-        // Sync current workspace files so the shell can see them
+
+        // Sync workspace files so the shell can see them
         try {
           const files = await db.files.toArray()
-          await syncWorkspaceToContainer(files)
+          if (files.length > 0) await syncWorkspaceToContainer(files)
         } catch {}
+
         if (cancelled) return
 
+        term.writeln("\x1b[1;32m✓ WebContainer ready\x1b[0m")
+
         const shell = await spawnShell()
+
+        // Wire output → terminal
         shell.onOutput((chunk) => {
-          term.write(chunk)
+          try { term.write(chunk) } catch {}
           target.buffer += chunk
-          // Persist buffer occasionally (every ~2KB)
           if (target.buffer.length % 2048 < 64 && db) {
             db.terminals.update(activeId, { buffer: target.buffer.slice(-50_000) }).catch(() => {})
           }
         })
-        term.onData((d) => shell.write(d))
-        term.onResize(({ cols, rows }) => shell.resize(cols, rows))
 
+        // Wire keyboard input → shell (the key interactive fix)
+        term.onData((d) => {
+          try { shell.write(d) } catch {}
+        })
+
+        // Wire resize
+        term.onResize(({ cols, rows }) => {
+          try { shell.resize(cols, rows) } catch {}
+        })
+
+        // Store handles on the session object
         target.term = term
         target.fit = fit
         target.shell = shell
         target.ready = true
-        setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, ready: true } : s))
+        setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, ready: true, term, fit, shell } : s))
 
         // Replay persisted buffer
         if (target.buffer) term.write(target.buffer)
+
+        // Focus the terminal
+        term.focus()
+
       } catch (e) {
-        const target = sessions.find((s) => s.id === activeId)
-        target?.term?.writeln(`\x1b[31mTerminal error: ${String(e)}\x1b[0m`)
+        const el = containerRef.current?.querySelector<HTMLDivElement>(`[data-term="${activeId}"]`)
+        if (el) {
+          const errDiv = document.createElement("div")
+          errDiv.style.cssText = "color:#f87171;padding:8px;font-size:12px;font-family:monospace"
+          errDiv.textContent = `Terminal error: ${String(e)}`
+          el.appendChild(errDiv)
+        }
       }
     })()
 
@@ -156,56 +210,100 @@ export function TerminalPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions.length])
 
-  // Refit on resize
+  // Resize handling via ResizeObserver
   useEffect(() => {
-    const onResize = () => {
-      sessions.forEach((s) => { try { s.fit?.fit() } catch {} })
+    const fitAll = () => {
+      sessionsRef.current.forEach((s) => {
+        if (s.ready && s.fit) {
+          requestAnimationFrame(() => {
+            try { s.fit?.fit() } catch {}
+          })
+        }
+      })
     }
-    window.addEventListener("resize", onResize)
-    const ro = new ResizeObserver(onResize)
+    window.addEventListener("resize", fitAll)
+    const ro = new ResizeObserver(fitAll)
     if (containerRef.current) ro.observe(containerRef.current)
-    return () => { window.removeEventListener("resize", onResize); ro.disconnect() }
-  }, [sessions])
+    return () => { window.removeEventListener("resize", fitAll); ro.disconnect() }
+  }, [])
+
+  // Focus terminal when switching sessions
+  const switchSession = (id: string) => {
+    setActiveId(id)
+    requestAnimationFrame(() => {
+      const s = sessionsRef.current.find((s) => s.id === id)
+      if (s?.term) {
+        s.term.focus()
+        try { s.fit?.fit() } catch {}
+      }
+    })
+  }
 
   const clear = () => {
-    const t = sessions.find((s) => s.id === activeId)?.term
-    t?.clear()
+    const s = sessions.find((s) => s.id === activeId)
+    s?.term?.clear()
+    s?.term?.focus()
   }
 
   return (
-    <div className="h-full flex flex-col bg-al-panel/40">
-      <div className="h-8 flex items-center gap-1 px-2 border-b border-border">
+    <div className="h-full flex flex-col bg-[#0c0c10]">
+      {/* Tab bar */}
+      <div className="h-8 flex items-center gap-1 px-2 border-b border-border bg-al-panel/60 flex-shrink-0">
         <AppIcon name="terminal" width={13} className="text-al-accent" />
-        <div className="flex items-center gap-1 text-[11px] overflow-x-auto">
+        <div className="flex items-center gap-0.5 text-[11px] overflow-x-auto flex-1 min-w-0">
           {sessions.map((s) => (
             <button
               key={s.id}
-              onClick={() => setActiveId(s.id)}
+              onClick={() => switchSession(s.id)}
               className={cn(
-                "px-2 py-0.5 rounded flex items-center gap-1 group",
-                s.id === activeId ? "bg-al-accent/20 text-foreground" : "text-muted-foreground hover:bg-accent/30"
+                "px-2 py-0.5 rounded flex items-center gap-1.5 group whitespace-nowrap flex-shrink-0 transition-colors",
+                s.id === activeId
+                  ? "bg-al-accent/20 text-foreground"
+                  : "text-muted-foreground hover:bg-accent/20"
               )}
             >
+              {s.id === activeId && s.ready && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+              )}
               {s.title}
               <span
                 onClick={(e) => { e.stopPropagation(); closeSession(s.id) }}
-                className="opacity-0 group-hover:opacity-100 hover:text-destructive"
+                className="opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive transition-opacity ml-0.5"
               >
                 <AppIcon name="close" width={10} />
               </span>
             </button>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-1">
-          <Button size="icon-sm" variant="ghost" onClick={createSession} title="New terminal">
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <Button
+            size="icon-sm" variant="ghost"
+            onClick={createSession}
+            title="New terminal (⌘T)"
+            className="h-6 w-6"
+          >
             <AppIcon name="plus" width={13} />
           </Button>
-          <Button size="icon-sm" variant="ghost" onClick={clear} title="Clear">
+          <Button
+            size="icon-sm" variant="ghost"
+            onClick={clear}
+            title="Clear terminal"
+            className="h-6 w-6"
+          >
             <AppIcon name="refresh" width={13} />
           </Button>
         </div>
       </div>
-      <div ref={containerRef} className="flex-1 relative bg-[#0c0c10] overflow-hidden">
+
+      {/* Terminal mount points */}
+      <div
+        ref={containerRef}
+        className="flex-1 relative overflow-hidden"
+        onClick={() => {
+          const s = sessions.find((s) => s.id === activeId)
+          s?.term?.focus()
+        }}
+      >
         {sessions.map((s) => (
           <div
             key={s.id}
@@ -217,9 +315,20 @@ export function TerminalPanel() {
           />
         ))}
         {sessions.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
-            No terminal sessions. Press <kbd className="mx-1 px-1 bg-al-panel border border-border rounded">+</kbd>
-            to spawn one.
+          <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground gap-2">
+            No terminal sessions.
+            <button
+              onClick={createSession}
+              className="px-2 py-0.5 bg-al-panel border border-border rounded hover:bg-al-panel/80 transition"
+            >
+              + New Terminal
+            </button>
+          </div>
+        )}
+        {/* Loading state for un-booted sessions */}
+        {sessions.some((s) => s.id === activeId && !s.ready) && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="text-xs text-muted-foreground animate-pulse">Booting WebContainer…</div>
           </div>
         )}
       </div>

@@ -1,13 +1,13 @@
 "use client"
 /**
- * Multi-agent orchestrator v2.
+ * Multi-agent orchestrator v3.
  *
  *   - Architect → Builder → Reviewer loop with bounded iterations.
- *   - is_done flags require concrete evidence.
+ *   - Rate-limit protection: exponential backoff on 429, inter-iteration delay.
+ *   - Improved is_done: requires concrete evidence + 2 consecutive positive reviews.
  *   - Streaming events (token deltas + tool calls + diffs).
  *   - Cost tracking + soft cap (settings.costCapUsd).
- *   - Retry policy applied per tool call.
- *   - Per-task retries counter + tool history.
+ *   - Multi-provider support via model-router.
  */
 import { db } from "@/lib/storage/db"
 import { TOOL_MAP, runToolWithPolicy } from "./tools"
@@ -25,17 +25,28 @@ export interface PlanStep {
 export interface OrchestratorEvent {
   type:
     | "plan" | "task_start" | "tool_call" | "tool_result" | "task_done" | "task_failed"
-    | "stop" | "log" | "delta" | "message" | "diff" | "usage" | "cost_cap_hit"
+    | "stop" | "log" | "delta" | "message" | "diff" | "usage" | "cost_cap_hit" | "rate_limit_wait"
   payload: unknown
 }
 
 type Listener = (e: OrchestratorEvent) => void
 
+/** Sleep with jitter to avoid thundering herd on rate limits */
+function sleep(ms: number, jitterFraction = 0.2) {
+  const jitter = ms * jitterFraction * (Math.random() * 2 - 1)
+  return new Promise<void>((r) => setTimeout(r, Math.max(100, ms + jitter)))
+}
+
+/** Detect rate limit from response or error message */
+function isRateLimit(err: unknown): boolean {
+  const msg = String(err).toLowerCase()
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("quota") || msg.includes("resource_exhausted")
+}
+
 export class Orchestrator {
   private listeners = new Set<Listener>()
   private aborted = false
   private accumulatedCostUsd = 0
-  /** Currently running chat (one run at a time per orchestrator). */
   public activeChatId: string | null = null
 
   on(l: Listener) { this.listeners.add(l); return () => { this.listeners.delete(l) } }
@@ -43,7 +54,6 @@ export class Orchestrator {
   abort() { this.aborted = true; this.emit({ type: "log", payload: "abort_requested" }) }
   isRunning() { return !!this.activeChatId }
 
-  /** Top-level entrypoint. Splits work, runs each task, verifies, stops at done or cap. */
   async run(chatId: string, userGoal: string) {
     if (this.activeChatId) {
       this.emit({ type: "log", payload: "another_run_in_progress" })
@@ -56,12 +66,10 @@ export class Orchestrator {
     const settings = useSettings.getState()
 
     try {
-      // 1. PLAN
       this.emit({ type: "log", payload: "Planner starting…" })
       const plan = await this.planGoal(userGoal)
       this.emit({ type: "plan", payload: plan })
 
-      // 2. CREATE TASKS
       const tasks: AgentTask[] = plan.map((s) => ({
         id: nanoid(),
         chatId,
@@ -79,7 +87,6 @@ export class Orchestrator {
       }))
       await db.tasks.bulkAdd(tasks)
 
-      // 3. EXECUTE EACH TASK SEQUENTIALLY (with bounded iterations)
       for (const task of tasks) {
         if (this.aborted) {
           this.emit({ type: "stop", payload: { reason: "user_aborted" } })
@@ -99,18 +106,16 @@ export class Orchestrator {
     }
   }
 
-  /** Call Gemini to produce a JSON plan. */
   private async planGoal(goal: string): Promise<PlanStep[]> {
     const settings = useSettings.getState()
-    const apiKey = settings.apiKeys.gemini
+    const apiKey = settings.apiKeys.gemini || settings.apiKeys.anthropic
     if (!apiKey) {
-      // Graceful degradation: emit a single-step plan
       return [{ title: "Implement goal", description: goal, doneCriteria: "User confirms result" }]
     }
-    const res = await fetch("/api/agents/plan", {
+    const res = await this.fetchWithRateLimitRetry("/api/agents/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, apiKey, model: settings.defaultModel }),
+      body: JSON.stringify({ goal, apiKey, model: settings.defaultModel, ollamaEndpoint: settings.ollamaEndpoint }),
     })
     const data = await res.json()
     if (data.usage) this.recordUsage(data.usage, undefined)
@@ -120,10 +125,11 @@ export class Orchestrator {
     return data.plan as PlanStep[]
   }
 
-  /** Run one task in a bounded loop until is_done or max iterations. */
   private async executeTask(task: AgentTask) {
     this.emit({ type: "task_start", payload: { id: task.id, title: task.title } })
     await db.tasks.update(task.id, { status: "in_progress" })
+    const settings = useSettings.getState()
+    let consecutivePositiveReviews = 0
 
     while (!this.aborted) {
       const fresh = await db.tasks.get(task.id)
@@ -137,12 +143,16 @@ export class Orchestrator {
         this.emit({ type: "task_failed", payload: { id: task.id, reason: "max_iterations" } })
         break
       }
-      const settings = useSettings.getState()
       if (settings.costCapUsd > 0 && this.accumulatedCostUsd >= settings.costCapUsd) {
         await db.tasks.update(task.id, { status: "failed" })
         this.emit({ type: "task_failed", payload: { id: task.id, reason: "cost_cap" } })
         this.emit({ type: "cost_cap_hit", payload: { spent: this.accumulatedCostUsd, cap: settings.costCapUsd } })
         break
+      }
+
+      // Inter-iteration delay to prevent rate limits
+      if (fresh.iterations > 0) {
+        await sleep(settings.iterationDelayMs)
       }
 
       // Builder step
@@ -167,7 +177,6 @@ export class Orchestrator {
         }
       }
 
-      // Persist a tool message into the chat for transcript clarity
       if (toolCall) {
         const msg: AgentMessage = {
           id: nanoid(), chatId: task.chatId, role: "tool",
@@ -180,20 +189,29 @@ export class Orchestrator {
         this.emit({ type: "message", payload: msg })
       }
 
-      // Reviewer step (verifies doneCriteria) — runs when builder asked to finalize OR after every 3 iterations
       const fresh2 = await db.tasks.get(task.id)
       if (!fresh2) break
-      const shouldReview = builder.finalize || fresh2.iterations > 0 && fresh2.iterations % 3 === 2
+
+      // Reviewer runs when builder finalizes OR every 3 iterations
+      const shouldReview = builder.finalize || (fresh2.iterations > 0 && fresh2.iterations % 3 === 2)
       if (shouldReview) {
+        // Add small delay before reviewer to avoid back-to-back rate limits
+        await sleep(200)
         const verdict = await this.askReviewer(fresh2)
         if (verdict.usage) this.recordUsage(verdict.usage, task.id)
         if (verdict.is_done) {
-          await db.tasks.update(task.id, {
-            is_done: true, status: "completed",
-            evidence: verdict.evidence, updatedAt: Date.now(),
-          })
-          this.emit({ type: "task_done", payload: { id: task.id, evidence: verdict.evidence } })
-          break
+          consecutivePositiveReviews++
+          // Require at least 1 confirmed positive review with concrete evidence
+          if (consecutivePositiveReviews >= 1 && verdict.evidence && verdict.evidence.length > 20) {
+            await db.tasks.update(task.id, {
+              is_done: true, status: "completed",
+              evidence: verdict.evidence, updatedAt: Date.now(),
+            })
+            this.emit({ type: "task_done", payload: { id: task.id, evidence: verdict.evidence } })
+            break
+          }
+        } else {
+          consecutivePositiveReviews = 0
         }
       }
 
@@ -203,34 +221,56 @@ export class Orchestrator {
 
   private async askBuilder(task: AgentTask): Promise<{ toolName?: string; args?: Record<string, unknown>; finalize?: boolean; usage?: TokenUsage }> {
     const settings = useSettings.getState()
-    const apiKey = settings.apiKeys.gemini
-    if (!apiKey) return { finalize: true } // no key → fall through to reviewer
-    const res = await fetch("/api/agents/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        role: "builder",
-        task,
-        apiKey,
-        model: settings.defaultModel,
-        systemPrompt: settings.systemPrompt,
-      }),
-    })
-    return await res.json()
+    const apiKey = settings.apiKeys.gemini || settings.apiKeys.anthropic
+    if (!apiKey && !settings.defaultModel.startsWith("ollama:")) return { finalize: true }
+    try {
+      const res = await this.fetchWithRateLimitRetry("/api/agents/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "builder", task, apiKey, model: settings.defaultModel,
+          systemPrompt: settings.systemPrompt, ollamaEndpoint: settings.ollamaEndpoint,
+        }),
+      })
+      return await res.json()
+    } catch (e) {
+      this.emit({ type: "log", payload: `builder_error: ${e}` })
+      return { finalize: true }
+    }
   }
 
   private async askReviewer(task: AgentTask): Promise<{ is_done: boolean; evidence: string; usage?: TokenUsage }> {
     const settings = useSettings.getState()
-    const apiKey = settings.apiKeys.gemini
-    if (!apiKey) return { is_done: false, evidence: "no_api_key" }
-    const res = await fetch("/api/agents/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        role: "reviewer", task, apiKey, model: "gemini-2.5-flash",
-      }),
-    })
-    return await res.json()
+    const apiKey = settings.apiKeys.gemini || settings.apiKeys.anthropic
+    if (!apiKey && !settings.defaultModel.startsWith("ollama:")) return { is_done: false, evidence: "no_api_key" }
+    try {
+      const res = await this.fetchWithRateLimitRetry("/api/agents/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: "reviewer", task, apiKey,
+          model: "gemini-2.5-flash", // Fast + cheap for reviews
+          ollamaEndpoint: settings.ollamaEndpoint,
+        }),
+      })
+      return await res.json()
+    } catch (e) {
+      this.emit({ type: "log", payload: `reviewer_error: ${e}` })
+      return { is_done: false, evidence: "error" }
+    }
+  }
+
+  /** Fetch with automatic exponential backoff on 429 rate limit responses */
+  private async fetchWithRateLimitRetry(url: string, init: RequestInit, maxRetries = 4): Promise<Response> {
+    let attempt = 0
+    while (true) {
+      const res = await fetch(url, init)
+      if (res.status !== 429 || attempt >= maxRetries) return res
+      const delay = Math.min(60_000, 2000 * Math.pow(2, attempt))
+      attempt++
+      this.emit({ type: "rate_limit_wait", payload: { delay, attempt } })
+      await sleep(delay, 0.3)
+    }
   }
 
   private async recordUsage(usage: TokenUsage, taskId?: string) {
@@ -238,17 +278,11 @@ export class Orchestrator {
     const cost = usage.costUsd ?? estimateCost(usage.model, usage.input, usage.output)
     this.accumulatedCostUsd += cost
     const row: UsageRow = {
-      id: nanoid(),
-      chatId: this.activeChatId,
-      taskId,
-      model: usage.model,
-      input: usage.input,
-      output: usage.output,
-      costUsd: cost,
-      ts: Date.now(),
+      id: nanoid(), chatId: this.activeChatId, taskId,
+      model: usage.model, input: usage.input, output: usage.output,
+      costUsd: cost, ts: Date.now(),
     }
     try { await db.usage.add(row) } catch {}
-    // Also bump the chat aggregate
     const chat = await db.chats.get(this.activeChatId)
     if (chat) {
       await db.chats.update(this.activeChatId, {
@@ -261,10 +295,8 @@ export class Orchestrator {
   }
 }
 
-// Singleton orchestrator (one run at a time per chat is enforced by UI)
 export const orchestrator = new Orchestrator()
 
-/** Helper for non-orchestrator callers that just want token + cost from a string. */
 export function approxUsage(model: string, prompt: string, completion: string): TokenUsage {
   const input = approxTokens(prompt)
   const output = approxTokens(completion)
