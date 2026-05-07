@@ -147,9 +147,23 @@ export function TerminalPanel() {
         setTimeout(() => { try { fit.fit() } catch {} }, 50)
 
         term.writeln("\x1b[1;35m⌁ AstroLaunch terminal — booting WebContainer…\x1b[0m")
+        term.writeln("\x1b[90m  Requires Chrome/Edge with cross-origin isolation. Takes ~5s on first boot.\x1b[0m")
 
-        // Boot WebContainer
-        await bootWebContainer()
+        // Boot WebContainer with a 30s timeout
+        const bootResult = await Promise.race([
+          bootWebContainer().then(() => "ok" as const),
+          new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 30_000)),
+        ])
+
+        if (bootResult === "timeout") {
+          term.writeln("\x1b[1;33m⚠ WebContainer boot timed out.\x1b[0m")
+          term.writeln("\x1b[90m  This usually means the browser lacks cross-origin isolation (COEP/COOP).\x1b[0m")
+          term.writeln("\x1b[90m  Please use Chrome or Edge, or open the app in a new tab.\x1b[0m")
+          term.writeln("")
+          term.writeln("\x1b[1;37mYou can still use the chat and code editor above.\x1b[0m")
+          setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, ready: true } : s))
+          return
+        }
 
         // Sync workspace files so the shell can see them
         try {

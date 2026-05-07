@@ -49,6 +49,9 @@ export function FloatingAgentChat() {
   const containerRef = useRef<HTMLDivElement>(null)
   const messagesRef = useRef<HTMLDivElement>(null)
   const sendBtnRef = useRef<HTMLButtonElement>(null)
+  // Defer client-only state (localStorage positions) to avoid SSR hydration mismatch
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
 
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [tasks, setTasks] = useState<AgentTask[]>([])
@@ -379,7 +382,7 @@ export function FloatingAgentChat() {
     await db.chats.update(activeChatId, { name: n, updatedAt: Date.now() })
   }
 
-  if (!showRightChat) return null
+  if (!showRightChat || !mounted) return null
 
   if (agentChatMinimized) {
     return (

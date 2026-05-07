@@ -10,9 +10,8 @@ export type SupportedModel =
   | "claude-haiku-3-5" | "claude-3-5-haiku-20241022"
   | "ollama:llama3.2" | "ollama:llama3.1" | "ollama:deepseek-r1"
   | "ollama:codestral" | "ollama:qwen2.5-coder" | "ollama:mistral" | "ollama:phi4"
-  | (string & Record<never, never>) // allow custom model strings
+  | (string & Record<never, never>)
 
-/** Legacy alias kept for backwards compatibility */
 export type GeminiModel = SupportedModel
 
 export interface ThemeColors {
@@ -45,7 +44,6 @@ export interface SettingsState {
   colors: ThemeColors
   defaultProvider: AgentProvider
   defaultModel: SupportedModel
-  /** Ollama server base URL */
   ollamaEndpoint: string
   apiKeys: Partial<Record<AgentProvider, string>>
   systemPrompt: string
@@ -53,9 +51,7 @@ export interface SettingsState {
   enablePlanner: boolean
   streamAgent: boolean
   showToolDiffs: boolean
-  /** Show agent reasoning/thinking blocks in chat */
   showThinking: boolean
-  /** Delay (ms) between orchestrator iterations — prevents rate limiting */
   iterationDelayMs: number
   retry: RetryPolicy
   costCapUsd: number
@@ -64,9 +60,7 @@ export interface SettingsState {
   tabSize: number
   aiInlineEdit: boolean
   pluginsEnabled: boolean
-  /** Show welcome modal on startup */
   showWelcome: boolean
-  /** Recently opened project folder names */
   recentProjects: string[]
   set: <K extends keyof SettingsState>(k: K, v: SettingsState[K]) => void
   setColor: (k: keyof ThemeColors, v: string) => void
@@ -99,19 +93,20 @@ const DEFAULTS = {
   borderRadius: 0.6,
   colors: DEFAULT_COLORS,
   defaultProvider: "gemini" as const,
-  defaultModel: "gemini-2.5-pro" as SupportedModel,
+  // Use Flash as default — more reliable, faster, great quality
+  defaultModel: "gemini-2.5-flash" as SupportedModel,
   ollamaEndpoint: "http://localhost:11434",
   apiKeys: {} as Partial<Record<AgentProvider, string>>,
   systemPrompt:
-    "You are an elite full-stack engineer agent inside the AstroLaunch IDE. Plan in small, verifiable steps. Mark each step is_done:true only after concrete output exists.",
-  maxIterations: 12,
+    "You are an elite full-stack engineer inside AstroLaunch IDE. You use React, Next.js, Framer Motion, Iconify, Shadcn/UI, and modern libraries. Always implement sidebar + navbar navigation. Never stop at one file — complete the entire feature. Use Framer Motion for all animations. Use @iconify/react for all icons.",
+  maxIterations: 25,
   enablePlanner: true,
   streamAgent: true,
   showToolDiffs: true,
   showThinking: true,
-  iterationDelayMs: 300,
-  retry: { maxRetries: 2, backoffMs: 600, timeoutMs: 60_000 } as RetryPolicy,
-  costCapUsd: 1.5,
+  iterationDelayMs: 400,
+  retry: { maxRetries: 3, backoffMs: 800, timeoutMs: 90_000 } as RetryPolicy,
+  costCapUsd: 2.0,
   rainbowBrackets: true,
   wordWrap: false,
   tabSize: 2,
@@ -134,7 +129,7 @@ export const useSettings = create<SettingsState>()(
       })),
       reset: () => set(DEFAULTS),
     }),
-    { name: "astrolaunch.settings.v3" }
+    { name: "astrolaunch.settings.v4" }
   )
 )
 

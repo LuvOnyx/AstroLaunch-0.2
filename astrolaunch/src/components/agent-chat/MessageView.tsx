@@ -40,10 +40,13 @@ export function MessageView({ message: m, streaming, showDiffs = true, thinkingS
           {!!tc?.durationMs && <span className="opacity-60">{tc.durationMs}ms</span>}
         </div>
         {showDiffs && m.toolDiffs?.map((d, i) => (
-          <button
+          <div
             key={i}
+            role="button"
+            tabIndex={0}
             onClick={() => setDiffViewer(true, d.path)}
-            className="block w-full text-left rounded border border-border bg-background/40 p-2 hover:bg-background/70"
+            onKeyDown={(e) => e.key === "Enter" && setDiffViewer(true, d.path)}
+            className="block w-full text-left rounded border border-border bg-background/40 p-2 hover:bg-background/70 cursor-pointer"
           >
             <div className="flex items-center gap-2 text-[11px]">
               <span className={cn(
@@ -57,7 +60,7 @@ export function MessageView({ message: m, streaming, showDiffs = true, thinkingS
               <span className="text-red-400">-{d.removed ?? 0}</span>
             </div>
             {d.unified && <UnifiedSnippet text={d.unified} />}
-          </button>
+          </div>
         ))}
       </div>
     )
