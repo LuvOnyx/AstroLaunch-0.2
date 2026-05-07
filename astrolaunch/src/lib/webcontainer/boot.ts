@@ -3,13 +3,13 @@
  * WebContainers boot + bridge.
  *
  * Exposes window.alWebContainer with:
- *   - run(command)            → quick one-shot command
- *   - writeFile(path, content)
- *   - readFile(path)
- *   - mountFiles(tree)
- *   - startDevServer(scriptName?)
- *   - spawnShell()             → returns { proc, write, onOutput, kill } for terminal
- *   - onServerReady(cb)
+ * - run(command)            → quick one-shot command
+ * - writeFile(path, content)
+ * - readFile(path)
+ * - mountFiles(tree)
+ * - startDevServer(scriptName?)
+ * - spawnShell()             → returns { proc, write, onOutput, kill } for terminal
+ * - onServerReady(cb)
  */
 import type { WebContainer, WebContainerProcess } from "@webcontainer/api"
 
@@ -29,16 +29,24 @@ export interface ShellHandle {
 export async function bootWebContainer(): Promise<WebContainer> {
   if (instance) return instance
   if (bootPromise) return bootPromise
-  const { WebContainer } = await import("@webcontainer/api")
-  bootPromise = WebContainer.boot().then((wc) => {
-    instance = wc
-    bridgeToWindow(wc)
-    wc.on("server-ready", (_port, url) => {
-      serverReadyListeners.forEach((cb) => { try { cb(url) } catch {} })
+
+  try {
+    const { WebContainer } = await import("@webcontainer/api")
+    bootPromise = WebContainer.boot().then((wc) => {
+      instance = wc
+      bridgeToWindow(wc)
+      wc.on("server-ready", (_port, url) => {
+        serverReadyListeners.forEach((cb) => { try { cb(url) } catch (e) { console.error("Server ready callback error:", e) } })
+      })
+      return wc
     })
-    return wc
-  })
-  return bootPromise
+    return await bootPromise
+  } catch (error) {
+    // Reset the promise so a subsequent attempt can try again instead of hanging forever
+    bootPromise = null
+    console.error("Failed to boot WebContainer. Ensure Cross-Origin-Isolation headers are set in Electron main process:", error)
+    throw error
+  }
 }
 
 export function isBooted() { return !!instance }
@@ -75,7 +83,7 @@ function bridgeToWindow(wc: WebContainer) {
       return new Promise<string>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("Dev server timeout")), 60_000)
         const off = onServerReady((url) => { clearTimeout(timeout); off(); resolve(url) })
-        devProcess?.exit.then((c) => { if (c !== 0) reject(new Error(`Dev server exited ${c}`)) })
+        devProcess?.exit.then((c) => { if (c !== 0) reject(new Error(`Dev server exited with code ${c}`)) })
       })
     },
     onOutput(cb: (chunk: string) => void) {
@@ -93,26 +101,35 @@ export function onServerReady(cb: (url: string) => void) {
 /** Spawn a JSH shell suitable for xterm.js. Returns a handle with bidirectional IO. */
 export async function spawnShell(cwd?: string): Promise<ShellHandle> {
   const wc = await bootWebContainer()
-  const args = ["jsh"]
+
   const proc = await wc.spawn("jsh", [], {
     terminal: { cols: 100, rows: 24 },
     env: cwd ? { PWD: cwd } : undefined,
   })
-  // jsh args fallback (some versions accept positional only)
-  void args
 
   const subscribers = new Set<(chunk: string) => void>()
+
+  // Safely pipe output
   proc.output.pipeTo(new WritableStream({
-    write(chunk) { subscribers.forEach((fn) => { try { fn(chunk) } catch {} }) },
-  }))
+    write(chunk) { 
+      subscribers.forEach((fn) => { try { fn(chunk) } catch {} }) 
+    },
+  })).catch(err => console.error("Shell output stream error:", err))
 
   const inputWriter = proc.input.getWriter()
+
   return {
     proc,
-    write: (data: string) => { void inputWriter.write(data) },
+    write: (data: string) => { 
+      // Catch writes to prevent crashing if the stream closes unexpectedly
+      inputWriter.write(data).catch(err => console.warn("Shell input write ignored (stream may be closed):", err)) 
+    },
     resize: (cols, rows) => { try { proc.resize({ cols, rows }) } catch {} },
     onOutput: (cb) => { subscribers.add(cb); return () => subscribers.delete(cb) },
-    kill: () => { try { proc.kill() } catch {} },
+    kill: () => { 
+      try { proc.kill() } catch {}
+      try { inputWriter.releaseLock() } catch {} 
+    },
   }
 }
 

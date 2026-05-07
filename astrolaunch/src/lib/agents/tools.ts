@@ -1,9 +1,10 @@
 /**
- * Agent tool registry v3.
- *   - retry policy (max retries, exponential backoff, hard timeout)
- *   - per-call diff capture (write_file / delete_file produce ToolDiff records)
- *   - WebContainer integration for run_command and install_deps
- *   - additional tools: search_files, apply_patch, http_fetch, mark_task_done, install_deps
+ * Agent tool registry v4.
+ *
+ * Key changes from v3:
+ *   - run_command / install_deps now call /api/exec (real server shell, not WebContainer)
+ *   - run_playwright added — writes spec to /tmp, runs it, returns output
+ *   - All shell-based tools work immediately without any browser prerequisite
  */
 import { db } from "@/lib/storage/db"
 import { nanoid } from "nanoid"
@@ -24,9 +25,11 @@ export interface ToolDef {
   run: (args: Record<string, unknown>, ctx: ToolCallContext) => Promise<unknown>
 }
 
+// ── helpers ──────────────────────────────────────────────────────────────────
+
 async function findByPath(path: string): Promise<FileNode | undefined> {
   const norm = path.startsWith("/") ? path : `/${path}`
-  return await db.files.where("path").equals(norm).first()
+  return db.files.where("path").equals(norm).first()
 }
 
 async function ensureFolders(path: string): Promise<string | null> {
@@ -46,29 +49,40 @@ async function ensureFolders(path: string): Promise<string | null> {
   return parentId
 }
 
-/** Bridge to window.alWebContainer for run_command and install_deps */
-async function runInContainer(command: string, timeoutMs = 120_000): Promise<{ code: number; output: string; error?: string }> {
-  if (typeof window === "undefined") return { code: 1, output: "", error: "No window (server context)" }
-  // @ts-expect-error - bridged from boot.ts
-  const wc = window.alWebContainer
-  if (!wc?.run) {
-    return { code: 1, output: "", error: "WebContainer not booted. Open the Preview panel first to initialize it." }
+/**
+ * Execute a shell command on the server via /api/exec.
+ * Replaces the old WebContainer-based runInContainer().
+ * Works immediately — no boot sequence, no browser restrictions.
+ */
+async function runOnServer(
+  command: string,
+  cwd?: string,
+  timeoutMs = 60_000,
+): Promise<{ code: number; output: string; error?: string }> {
+  if (typeof window === "undefined") {
+    // Server-side tool call (shouldn't happen normally)
+    return { code: 1, output: "", error: "runOnServer called server-side" }
   }
   try {
-    const result = await Promise.race([
-      wc.run(command),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Command timed out")), timeoutMs)),
-    ])
-    return result as { code: number; output: string }
+    const res = await fetch("/api/exec", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ command, cwd, timeout: timeoutMs }),
+    })
+    if (!res.ok) return { code: 1, output: "", error: `HTTP ${res.status}` }
+    return await res.json()
   } catch (e) {
     return { code: 1, output: "", error: String(e) }
   }
 }
 
+// ── tool definitions ──────────────────────────────────────────────────────────
+
 export const TOOLS: ToolDef[] = [
+  // ── file system ────────────────────────────────────────────────────────────
   {
     name: "read_file",
-    description: "Read the full text content of a file at the given path.",
+    description: "Read the full text content of a file from the workspace virtual filesystem.",
     permissions: ["read_files"],
     parameters: { path: { type: "string", description: "Workspace-relative path", required: true } },
     run: async ({ path }) => {
@@ -79,49 +93,38 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "write_file",
-    description: "Create or overwrite a file at path with content. Captures a diff for review.",
+    description: "Create or overwrite a file. Captures a diff. Always write COMPLETE file content.",
     permissions: ["write_files"],
     parameters: {
-      path: { type: "string", description: "Path", required: true },
+      path:    { type: "string", description: "Path",         required: true },
       content: { type: "string", description: "File content", required: true },
     },
     run: async ({ path, content }, ctx) => {
-      const p = String(path).startsWith("/") ? String(path) : `/${path}`
+      const p    = String(path).startsWith("/") ? String(path) : `/${path}`
       const next = String(content)
       const existing = await findByPath(p)
-      const now = Date.now()
+      const now  = Date.now()
       if (existing) {
         const before = existing.content ?? ""
         const d = diffLines(before, next)
-        if (ctx.diffs) ctx.diffs.push({
-          tool: "write_file", path: p, kind: "update",
-          before, after: next, unified: d.unified, added: d.added, removed: d.removed,
-        })
-        await db.files.update(existing.id, {
-          content: next, modified: now, size: next.length, agentTouched: 1, baseline: existing.baseline ?? before,
-        })
+        if (ctx.diffs) ctx.diffs.push({ tool: "write_file", path: p, kind: "update", before, after: next, unified: d.unified, added: d.added, removed: d.removed })
+        await db.files.update(existing.id, { content: next, modified: now, size: next.length, agentTouched: 1, baseline: existing.baseline ?? before })
         return { ok: true, updated: true, path: p, added: d.added, removed: d.removed }
       }
       const parentId = await ensureFolders(p)
       const id = nanoid()
       const name = p.split("/").pop() ?? p
       const d = diffLines("", next)
-      if (ctx.diffs) ctx.diffs.push({
-        tool: "write_file", path: p, kind: "create",
-        before: "", after: next, unified: d.unified, added: d.added, removed: 0,
-      })
-      await db.files.add({
-        id, name, path: p, type: "file", parentId,
-        content: next, modified: now, size: next.length, agentTouched: 1, baseline: "",
-      })
+      if (ctx.diffs) ctx.diffs.push({ tool: "write_file", path: p, kind: "create", before: "", after: next, unified: d.unified, added: d.added, removed: 0 })
+      await db.files.add({ id, name, path: p, type: "file", parentId, content: next, modified: now, size: next.length, agentTouched: 1, baseline: "" })
       return { ok: true, created: true, path: p, added: d.added }
     },
   },
   {
     name: "list_files",
-    description: "List all files and folders, optionally under a prefix.",
+    description: "List all files and folders in the workspace, optionally filtered by path prefix.",
     permissions: ["read_files"],
-    parameters: { prefix: { type: "string", description: "Path prefix" } },
+    parameters: { prefix: { type: "string", description: "Path prefix filter (optional)" } },
     run: async ({ prefix }) => {
       const all = await db.files.toArray()
       const filtered = prefix ? all.filter((f) => f.path.startsWith(String(prefix))) : all
@@ -130,34 +133,30 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "delete_file",
-    description: "Delete a file by path.",
+    description: "Delete a file from the workspace by path.",
     permissions: ["write_files"],
     parameters: { path: { type: "string", description: "Path", required: true } },
     run: async ({ path }, ctx) => {
       const node = await findByPath(String(path))
       if (!node) return { error: "Not found" }
       const before = node.content ?? ""
-      if (ctx.diffs) ctx.diffs.push({
-        tool: "delete_file", path: node.path, kind: "delete",
-        before, after: "", unified: `--- a${node.path}\n+++ /dev/null\n`,
-        added: 0, removed: before.split("\n").length,
-      })
+      if (ctx.diffs) ctx.diffs.push({ tool: "delete_file", path: node.path, kind: "delete", before, after: "", unified: `--- a${node.path}\n+++ /dev/null\n`, added: 0, removed: before.split("\n").length })
       await db.files.delete(node.id)
       return { ok: true, path: node.path }
     },
   },
   {
     name: "search_files",
-    description: "Search files by content. Returns matching paths with line numbers.",
+    description: "Search workspace files by content substring or /regex/. Returns matching paths + line numbers.",
     permissions: ["read_files"],
     parameters: {
-      query: { type: "string", description: "Substring or /regex/ pattern", required: true },
-      maxResults: { type: "number", description: "Max results to return" },
+      query:      { type: "string", description: "Substring or /regex/ pattern", required: true },
+      maxResults: { type: "number", description: "Max results (default 50)" },
     },
     run: async ({ query, maxResults = 50 }) => {
       const all = await db.files.where("type").equals("file").toArray()
-      const q = String(query)
-      const re = q.startsWith("/") && q.lastIndexOf("/") > 0
+      const q   = String(query)
+      const re  = q.startsWith("/") && q.lastIndexOf("/") > 0
         ? new RegExp(q.slice(1, q.lastIndexOf("/")), q.slice(q.lastIndexOf("/") + 1))
         : new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
       const out: { path: string; line: number; preview: string }[] = []
@@ -173,75 +172,110 @@ export const TOOLS: ToolDef[] = [
       return { results: out }
     },
   },
+
+  // ── shell execution ─────────────────────────────────────────────────────────
   {
     name: "run_command",
-    description: "Run a shell command inside the WebContainer. Returns stdout + exit code. Use this for build checks, tests, etc.",
+    description:
+      "Run a shell command on the server (real bash — not a container). " +
+      "Use for: checking/building files, running scripts, verifying output, git operations. " +
+      "Runs in the project's working directory. Returns stdout+stderr and exit code.",
     permissions: ["run_commands"],
     parameters: {
-      command: { type: "string", description: "Shell command to execute", required: true },
+      command: { type: "string", description: "Shell command", required: true },
+      cwd:     { type: "string", description: "Working directory override (optional)" },
     },
-    run: async ({ command }) => {
-      return await runInContainer(String(command), 60_000)
+    run: async ({ command, cwd }) => {
+      return runOnServer(String(command), cwd ? String(cwd) : undefined, 60_000)
     },
   },
   {
     name: "install_deps",
-    description: "Install npm or pip packages required by the project. Use 'npm install <pkg>' or 'pip install <pkg>'. Waits up to 3 minutes for completion.",
+    description:
+      "Install npm / pip / yarn packages on the server. " +
+      "Accepts: 'npm install <pkg>', 'pip install <pkg>', 'yarn add <pkg>', 'pnpm add <pkg>'. " +
+      "Waits up to 3 minutes.",
     permissions: ["run_commands"],
     parameters: {
-      command: { type: "string", description: "Install command e.g. 'npm install express' or 'pip install requests'", required: true },
+      command: { type: "string", description: "Install command e.g. 'npm install framer-motion'", required: true },
     },
     run: async ({ command }) => {
       const cmd = String(command).trim()
-      // Safety: only allow install commands
       const allowed = /^(npm (install|i|add)|yarn (add|install)|pnpm (add|install)|pip install|pip3 install|bun add)\s+/i
       if (!allowed.test(cmd)) {
         return { error: "Only package install commands are allowed (npm install, pip install, etc.)" }
       }
-      const result = await runInContainer(cmd, 180_000)
+      const result = await runOnServer(cmd, undefined, 180_000)
       return {
         ...result,
-        note: result.code === 0
-          ? "Package installed successfully."
-          : "Installation failed. Check output for details.",
+        note: result.code === 0 ? "Package installed successfully." : "Installation failed. Check output for details.",
       }
     },
   },
+
+  // ── playwright ──────────────────────────────────────────────────────────────
+  {
+    name: "run_playwright",
+    description:
+      "Write and run a Playwright end-to-end test. " +
+      "Provide `spec` with valid TypeScript test code (import from '@playwright/test'). " +
+      "The test runs headlessly against the running dev server at http://localhost:5000. " +
+      "Returns full test output including pass/fail status.",
+    permissions: ["run_commands"],
+    parameters: {
+      spec:     { type: "string", description: "Full TypeScript test file content", required: true },
+      filename: { type: "string", description: "Test filename e.g. 'login.spec.ts' (default: 'agent-test.spec.ts')" },
+    },
+    run: async ({ spec, filename = "agent-test.spec.ts" }) => {
+      const fname  = String(filename).replace(/[^a-z0-9._-]/gi, "-")
+      const fpath  = `/tmp/al-pw-${Date.now()}-${fname}`
+      // Write the spec file then run it
+      const writeCmd = `cat > ${fpath} << 'PLAYWRIGHT_EOF'\n${String(spec)}\nPLAYWRIGHT_EOF`
+      const write    = await runOnServer(writeCmd, undefined, 10_000)
+      if (write.code !== 0) return { ...write, error: `Failed to write spec: ${write.error}` }
+
+      const runCmd = `PLAYWRIGHT_BASE_URL=http://localhost:5000 npx playwright test ${fpath} --reporter=list 2>&1`
+      const result = await runOnServer(runCmd, undefined, 120_000)
+      // Cleanup
+      await runOnServer(`rm -f ${fpath}`, undefined, 5_000).catch(() => {})
+      return result
+    },
+  },
+
+  // ── network ─────────────────────────────────────────────────────────────────
   {
     name: "http_fetch",
-    description: "Fetch a URL (GET) and return text body. Useful for pulling docs or examples.",
+    description: "Fetch a URL (GET) and return text body. Useful for pulling docs or checking APIs.",
     permissions: ["agent_calls"],
     parameters: {
-      url: { type: "string", description: "https URL", required: true },
-      maxBytes: { type: "number", description: "Cap response size" },
+      url:      { type: "string", description: "https URL", required: true },
+      maxBytes: { type: "number", description: "Cap response size (default 50 000)" },
     },
     run: async ({ url, maxBytes = 50_000 }) => {
       const u = String(url)
       if (!/^https?:\/\//.test(u)) return { error: "Only http(s) URLs allowed" }
       try {
-        const res = await fetch(u, { method: "GET" })
+        const res  = await fetch(u)
         const text = (await res.text()).slice(0, Number(maxBytes))
         return { ok: res.ok, status: res.status, body: text }
       } catch (e) { return { error: String(e) } }
     },
   },
+
+  // ── task management ─────────────────────────────────────────────────────────
   {
     name: "mark_task_done",
-    description:
-      "Mark a task is_done:true with evidence. Reviewer agent should use this only after verifying doneCriteria with concrete proof.",
+    description: "Mark a task is_done:true. Reviewer should call this only after verifying doneCriteria with concrete proof (min 30 chars).",
     parameters: {
-      taskId: { type: "string", description: "Task id", required: true },
+      taskId:   { type: "string", description: "Task id",                          required: true },
       evidence: { type: "string", description: "Concrete evidence (min 30 chars)", required: true },
     },
     run: async ({ taskId, evidence }) => {
       const t = await db.tasks.get(String(taskId))
       if (!t) return { error: "Task not found" }
       const ev = String(evidence)
-      if (ev.length < 20) return { error: "Evidence too vague. Provide concrete proof of completion." }
-      await db.tasks.update(t.id, {
-        is_done: true, status: "completed",
-        evidence: ev, updatedAt: Date.now(),
-      })
+      if (ev.length < 30) return { error: "Evidence too vague. Provide concrete proof of completion." }
+      await db.tasks.update(t.id, { is_done: true, status: "completed", evidence: ev, updatedAt: Date.now() })
       return { ok: true, taskId: t.id }
     },
   },
@@ -254,7 +288,7 @@ export async function runToolWithPolicy(
   args: Record<string, unknown>,
   ctx: ToolCallContext,
 ): Promise<ToolCall> {
-  const def = TOOL_MAP[name]
+  const def  = TOOL_MAP[name]
   const call: ToolCall = { id: nanoid(), name, args, status: "running", retries: 0 }
   if (!def) {
     call.status = "error"
@@ -270,19 +304,18 @@ export async function runToolWithPolicy(
         def.run(args, ctx),
         new Promise((_, rej) => setTimeout(() => rej(new Error("tool_timeout")), ctx.retry.timeoutMs)),
       ])
-      call.result = result
-      call.status = "success"
+      call.result    = result
+      call.status    = "success"
       call.durationMs = Date.now() - start
       return call
     } catch (err) {
       lastErr = err
-      if (attempt < ctx.retry.maxRetries) {
+      if (attempt < ctx.retry.maxRetries)
         await new Promise((r) => setTimeout(r, ctx.retry.backoffMs * 2 ** attempt))
-      }
     }
   }
-  call.status = "error"
-  call.result = { error: String(lastErr) }
+  call.status    = "error"
+  call.result    = { error: String(lastErr) }
   call.durationMs = Date.now() - start
   return call
 }
@@ -291,10 +324,10 @@ export function toolsAsGeminiSchema() {
   return [
     {
       functionDeclarations: TOOLS.map((t) => ({
-        name: t.name,
+        name:        t.name,
         description: t.description,
-        parameters: {
-          type: "OBJECT",
+        parameters:  {
+          type:       "OBJECT",
           properties: Object.fromEntries(
             Object.entries(t.parameters).map(([k, v]) => [k, { type: v.type.toUpperCase(), description: v.description }])
           ),
